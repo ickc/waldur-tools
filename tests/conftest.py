@@ -14,15 +14,32 @@ def settings(tmp_path):
 
 @pytest.fixture
 def allocations():
+    """Two projects, and one of them on two services -- as the real portal does."""
     return [
         {
             "url": f"{API_URL}/api/openportal-allocations/aaa/",
             "uuid": "aaa",
             "service_name": "Isambard 3",
             "project_name": "Project A",
+            "project_uuid": "pa",
             "customer_name": "UKRI",
-            "backend_id": "proja.brics",
+            "groupname": "brics.abc1",
+            "backend_id": "abc1.brics",
             "node_usage": "50.0",
+            "node_limit": 100,
+            "is_active": True,
+            "state": "OK",
+        },
+        {
+            "url": f"{API_URL}/api/openportal-allocations/aaa2/",
+            "uuid": "aaa2",
+            "service_name": "Isambard 3 Multi Architecture System",
+            "project_name": "Project A",
+            "project_uuid": "pa",
+            "customer_name": "UKRI",
+            "groupname": "brics.abc1",
+            "backend_id": "abc1.brics",
+            "node_usage": "0.0",
             "node_limit": 100,
             "is_active": True,
             "state": "OK",
@@ -30,10 +47,12 @@ def allocations():
         {
             "url": f"{API_URL}/api/openportal-allocations/bbb/",
             "uuid": "bbb",
-            "service_name": "Isambard-AI",
+            "service_name": "Isambard 3",
             "project_name": "Project B",
+            "project_uuid": "pb",
             "customer_name": "UKRI",
-            "backend_id": "projb.brics",
+            "groupname": "brics.abc2",
+            "backend_id": "abc2.brics",
             "node_usage": "0.0",
             "node_limit": 200,
             "is_active": True,
@@ -44,19 +63,54 @@ def allocations():
 
 @pytest.fixture
 def associations():
+    """One row per service alongside out-of-scope and fully blanked rows."""
     return [
         {
             "uuid": "1",
-            "username": "alice",
-            "groupname": "g.a",
+            "username": "alice.abc1",
+            "groupname": "brics.abc1",
+            "useridentifier": "alice.abc1.brics",
             "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
         },
         {
-            "uuid": "2",
-            "username": "bob",
-            "groupname": "g.b",
-            "allocation": f"{API_URL}/api/openportal-allocations/bbb/",
+            # Same person, same project, second service -- as the portal does.
+            "uuid": "1b",
+            "username": "alice.abc1",
+            "groupname": "brics.abc1",
+            "useridentifier": "alice.abc1.brics",
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa2/",
         },
+        {
+            "uuid": "2",
+            "username": "bob.abc2",
+            "groupname": "brics.abc2",
+            "useridentifier": "bob.abc2.brics",
+            # Points at a second allocation this token cannot see, as most do.
+            "allocation": f"{API_URL}/api/openportal-allocations/unseen/",
+        },
+        {
+            "uuid": "3",
+            "username": "carol.zzz",
+            "groupname": "brics.zzz",
+            "useridentifier": "carol.zzz.brics",
+            "allocation": f"{API_URL}/api/openportal-allocations/zzz/",
+        },
+        {
+            # The portal blanks every field it will not let you read.
+            "uuid": "4",
+            "username": None,
+            "groupname": None,
+            "useridentifier": None,
+            "allocation": f"{API_URL}/api/openportal-allocations/hidden/",
+        },
+    ]
+
+
+@pytest.fixture
+def users():
+    return [
+        {"unix_username": "alice", "full_name": "Alice A", "email": "alice@example.test"},
+        {"unix_username": "bob", "full_name": "Bob B", "email": "bob@example.test"},
     ]
 
 
@@ -83,17 +137,45 @@ def accounting_summary():
 
 
 @pytest.fixture
+def user_usage_rows():
+    return [
+        {
+            "username": "alice.abc1.brics",
+            "full_name": "Alice",
+            "node_usage": "1.5",
+            "year": 2025,
+            "month": 1,
+        },
+        {
+            "username": "alice.abc1.brics",
+            "full_name": "Alice",
+            "node_usage": "2.5",
+            "year": 2026,
+            "month": 2,
+        },
+        # Another organisation's user: visible on this endpoint, but not ours.
+        {
+            "username": "carol.zzz.brics",
+            "full_name": "Carol",
+            "node_usage": "99.0",
+            "year": 2026,
+            "month": 2,
+        },
+    ]
+
+
+@pytest.fixture
 def usage_reports():
     return [
         {
             "id": 1,
             "year": 2026,
             "month": 3,
-            "project_identifier": "proja.brics",
+            "project_identifier": "abc1.brics",
             "resource": "brics.i3.clusters.macs",
             "is_complete": True,
             "report": {
-                "project": "proja.brics",
+                "project": "abc1.brics",
                 "reports": {
                     "2026-03-01": {
                         "num_jobs": 10,

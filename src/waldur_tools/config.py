@@ -13,14 +13,18 @@ DEFAULT_API_URL = "https://portal-api.isambard.ac.uk"
 _TOKEN_HELP = """\
 No Waldur API token found.
 
-Set it in .envrc.local at the repository root (direnv picks it up automatically,
-and the file is gitignored):
+Set it in .envrc.local at the repository root. The file is gitignored, and pixi
+sources it on every command via scripts/activate.sh:
 
     echo 'export WALDUR_API_TOKEN=<your token>' > .envrc.local
 
 Alternatively point WALDUR_TOKEN_FILE at a file containing just the token, or
 place it in ~/.config/waldur/token. The token is issued by the portal under
-your own account menu.\
+your own account menu.
+
+Note that portal tokens are short-lived -- hours, not days -- so a token that
+worked this morning will not work this afternoon. Rewriting .envrc.local is
+part of the routine; the next command picks the new value up immediately.\
 """
 
 

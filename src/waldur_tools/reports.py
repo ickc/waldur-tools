@@ -3,6 +3,14 @@
 Every report takes a source -- a :class:`~waldur_tools.cache.Snapshot` or a live
 :class:`~waldur_tools.client.WaldurClient` -- and returns a polars DataFrame, so
 they compose in notebooks as readily as in the CLI.
+
+**How much is the API's and how much is ours?** Mostly the API's. Each report
+selects and renames columns straight from one or two endpoints; the only
+computed columns are the handful named in each docstring below, and DEVELOPER.md
+tabulates every one of them with its formula. Nothing is silently aggregated or
+imputed. The one exception worth knowing about is ``scope``: by default the
+reports drop rows describing projects outside your administrative reach, because
+the portal returns those rows with most fields blanked out. See :func:`in_scope`.
 """
 
 from __future__ import annotations
@@ -20,12 +28,65 @@ if TYPE_CHECKING:
     from .client import WaldurClient
 
 
+def project_code(column: str) -> pl.Expr:
+    """Extract the SLURM project code from a Waldur ``groupname``/``username``.
+
+    Isambard's SLURM names are structured: an allocation's ``groupname`` is
+    ``brics.<code>`` (or ``group.<name>`` for legacy internal projects), an
+    association's ``username`` is ``<unix user>.<code>``, and its
+    ``useridentifier`` is ``<unix user>.<code>.<cluster>``. The code -- e.g.
+    ``abc1`` -- is the stable key that ties a person to a project, and unlike
+    the allocation URL it survives a project having several allocations.
+    """
+    return pl.col(column).str.split(".").list.get(1, null_on_oob=True)
+
+
+def in_scope(source: Snapshot | WaldurClient) -> pl.DataFrame:
+    """The projects this token administers, one row per SLURM project code.
+
+    The portal is multi-tenant: Isambard 3 is run by Bristol, and a token issued
+    to (say) an Exeter administrator sees every *association* on the machine but
+    only its own organisation's *allocations* -- a small set of allocations
+    against a much larger set of associations spanning many more project codes
+    than the token administers -- and the out-of-scope association rows come
+    back with ``username``, ``groupname`` and ``useridentifier`` all null,
+    since the portal blanks what you may not read. There is no documented API
+    filter for "mine"; the visible allocations *are* the answer, so this
+    derives the scope from them rather than guessing from blank fields.
+    """
+    allocations = load(source, ["openportal-allocations"])["openportal-allocations"]
+    if allocations.is_empty():
+        return pl.DataFrame(schema={"project_code": pl.String})
+    return (
+        allocations.select(
+            project_code=project_code("groupname"),
+            project_name="project_name",
+            customer_name="customer_name",
+            project_uuid="project_uuid",
+        )
+        .drop_nulls("project_code")
+        .unique(subset=["project_code"], keep="first")
+    )
+
+
 def credits(source: Snapshot | WaldurClient) -> pl.DataFrame:
     """Credit burn-down per project, with a runway estimate.
 
-    ``months_remaining`` divides the unspent balance by the current month's
-    spend, so it answers "at this rate, when do we run dry?". It is null where
-    nothing has been spent this month.
+    Everything except ``remaining``, ``used_pct``, ``overspent`` and
+    ``months_remaining`` is verbatim from ``openportal-accounting-summary``.
+
+    ``months_remaining`` is the unspent balance divided by *this* month's spend,
+    answering "at this rate, when do we run dry?". Two caveats it pays to know:
+
+    * It is **negative when the project has already overspent**, because
+      ``remaining`` is negative -- e.g. an award of 40,000 credits, 42,000
+      spent, is -2,000 remaining, and if 1,000 of that was spent this month
+      that is ``-2.0``. Read a negative value as "already over, and still
+      spending"; ``overspent`` says so outright.
+    * It is null when nothing has been spent this month, since the rate is zero,
+      not because the project is fine.
+
+    The sort puts the most negative first, so the projects in trouble lead.
     """
     frame = load(source, ["openportal-accounting-summary"])["openportal-accounting-summary"]
     if frame.is_empty():
@@ -41,6 +102,7 @@ def credits(source: Snapshot | WaldurClient) -> pl.DataFrame:
                 / pl.col("current_month_spend").replace(0.0, None)
             ),
         )
+        .with_columns(overspent=pl.col("remaining") < 0)
         .select(
             "project_name",
             "customer_name",
@@ -49,6 +111,7 @@ def credits(source: Snapshot | WaldurClient) -> pl.DataFrame:
             "current_month_spend",
             "remaining",
             "used_pct",
+            "overspent",
             "months_remaining",
             "end_date",
         )
@@ -56,55 +119,107 @@ def credits(source: Snapshot | WaldurClient) -> pl.DataFrame:
     )
 
 
-def membership(source: Snapshot | WaldurClient) -> pl.DataFrame:
-    """Who has access to what: one row per user/service pairing.
+def membership(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFrame:
+    """Who has access to what: one row per user/project pairing.
 
     This is the ``count_users()`` example from ``gw4-isambard/rse-sharing``,
-    except the allocation lookup is a join rather than an HTTP call per row.
+    rebuilt as a join. The upstream version issues one allocation GET per
+    association row, which cannot complete here: associations reference far
+    more distinct allocations than a typical token can fetch, and the rest
+    return 404.
 
-    Two things about the real data shape this. Associations reference far more
-    allocations than a typical token can fetch individually, and fetching an
-    invisible one returns 404 -- which is why the upstream example, which
-    requests each allocation individually, cannot complete. A left join
-    degrades instead: unresolved rows keep their username and sort last, and
-    ``resolved`` says which is which. Some
-    associations also carry no username at all, so those sort last too
-    rather than leading the report with a wall of blanks.
+    ``project_code`` is parsed from ``groupname`` (see :func:`project_code`) and
+    ``unix_username`` from ``username``; the project and customer names are
+    joined in from ``openportal-allocations``, and the real name and email from
+    ``users``, which is already scoped to your organisation.
+
+    The project join is on ``project_code``, not on the allocation URL. Each
+    project has an allocation per service -- Isambard 3 and Isambard 3 MACS both
+    appear -- so an association points at only one of them, and a URL join
+    resolves only the allocations you can fetch individually, where a code
+    join resolves every row belonging to a visible project.
+
+    That same duplication means the raw endpoint carries one association per
+    user *per service*. Since a person's access is per project, those collapse
+    to a single row, with ``associations`` keeping the count so nothing is
+    hidden -- in-scope association rows roughly halve into pairings.
+
+    With ``scope=True`` (the default) only in-scope rows are returned.
+    ``scope=False`` returns everything -- mostly other organisations' users,
+    plus the rows the portal blanked entirely.
     """
-    data = load(source, ["openportal-associations", "openportal-allocations"])
-    associations, allocations = data["openportal-associations"], data["openportal-allocations"]
+    data = load(source, ["openportal-associations", "openportal-allocations", "users"])
+    associations = data["openportal-associations"]
     if associations.is_empty():
         return associations
 
-    lookup = allocations.select(
-        allocation="url",
-        service_name="service_name",
-        project_name="project_name",
-        customer_name="customer_name",
+    people = data["users"].select(
+        unix_username="unix_username", full_name="full_name", email="email"
     )
+    frame = (
+        associations.with_columns(
+            project_code=project_code("groupname"),
+            unix_username=pl.col("username").str.split(".").list.first(),
+        )
+        .join(in_scope(source).drop("project_uuid"), on="project_code", how="left")
+        .join(people, on="unix_username", how="left")
+    )
+
+    if scope:
+        frame = frame.filter(pl.col("project_name").is_not_null())
+
     return (
-        associations.join(lookup, on="allocation", how="left")
-        .with_columns(resolved=pl.col("service_name").is_not_null())
+        frame.group_by("unix_username", "project_code")
+        .agg(
+            full_name=pl.col("full_name").first(),
+            email=pl.col("email").first(),
+            project_name=pl.col("project_name").first(),
+            customer_name=pl.col("customer_name").first(),
+            associations=pl.len(),
+        )
         .select(
-            "username",
-            "service_name",
+            "unix_username",
+            "full_name",
+            "project_code",
             "project_name",
             "customer_name",
-            "groupname",
-            "resolved",
+            "email",
+            "associations",
         )
-        .sort(
-            [pl.col("resolved").not_(), pl.col("username"), pl.col("service_name")],
-            nulls_last=True,
-        )
+        .sort(["customer_name", "project_name", "unix_username"], nulls_last=True)
     )
 
 
 def utilisation(source: Snapshot | WaldurClient) -> pl.DataFrame:
-    """Allocation headroom: node usage against the configured node limit.
+    """This month's node usage per allocation, against the SLURM node limit.
 
-    Sorted with the emptiest active allocations first -- those are the ones
-    holding capacity nobody is using.
+    Beware the name: ``node_usage`` on ``openportal-allocations`` is **not**
+    cumulative. It matches ``current_month_spend`` from the accounting summary
+    to the penny for every project observed, so it is the
+    current month's usage only -- which is why this report's ``month_vs_limit_pct``
+    is so much smaller than ``credits.used_pct``, and why nothing here ever
+    exceeds 100% while a project can be over budget in ``credits``. The two
+    columns answer different questions:
+
+    ==========================  =========================================
+    ``credits.used_pct``        lifetime spend / lifetime credits
+    ``month_vs_limit_pct``      this month's usage / remaining node limit
+    ==========================  =========================================
+
+    ``node_limit`` empirically tracks ``total_credits - total_spend`` as of the
+    last SLURM sync (exact for most projects, within a few percent for the
+    rest) and never goes negative, so overspent projects show a stale positive
+    limit. The portal does not document how it is derived; that correspondence
+    is an observation, not a contract.
+
+    ``state`` is Waldur's resource state machine -- ``Creating``, ``OK``,
+    ``Erred``, ``Deleting`` -- describing whether the portal succeeded in
+    provisioning the allocation onto the cluster, not whether anyone is using
+    it. Every allocation in normal operation reads ``OK``. ``is_active`` is the
+    separate question of whether the allocation is switched on.
+
+    Sorted emptiest first: those are the allocations holding capacity nobody
+    used this month.
     """
     frame = load(source, ["openportal-allocations"])["openportal-allocations"]
     if frame.is_empty():
@@ -113,37 +228,68 @@ def utilisation(source: Snapshot | WaldurClient) -> pl.DataFrame:
     frame = numeric(frame, "node_usage", "node_limit")
     return (
         frame.with_columns(
-            used_pct=100 * pl.col("node_usage") / pl.col("node_limit").replace(0.0, None)
+            project_code=project_code("groupname"),
+            month_vs_limit_pct=(
+                100 * pl.col("node_usage") / pl.col("node_limit").replace(0.0, None)
+            ),
         )
+        .rename({"node_usage": "node_usage_this_month"})
         .select(
             "project_name",
+            "project_code",
             "service_name",
             "customer_name",
-            "backend_id",
-            "node_usage",
+            "node_usage_this_month",
             "node_limit",
-            "used_pct",
+            "month_vs_limit_pct",
             "is_active",
             "state",
         )
-        .sort("used_pct", nulls_last=True)
+        .sort("month_vs_limit_pct", nulls_last=True)
     )
 
 
-def user_usage(source: Snapshot | WaldurClient, *, year: int | None = None) -> pl.DataFrame:
-    """Per-user node usage aggregated across allocations, heaviest first."""
+def user_usage(
+    source: Snapshot | WaldurClient,
+    *,
+    year: int | None = None,
+    scope: bool = True,
+) -> pl.DataFrame:
+    """Per-user node usage summed across allocations and months, heaviest first.
+
+    Source is ``openportal-allocation-user-usage``, one row per user, allocation
+    and calendar month. ``username`` there is ``<unix user>.<code>.<cluster>``,
+    so this groups on the leading unix name to combine a person's projects, and
+    sums ``node_usage`` -- which *is* cumulative here, unlike the identically
+    named field on ``openportal-allocations``.
+
+    ``months_active`` counts source rows with non-zero usage, so a user on two
+    allocations in one month counts twice; treat it as an activity score rather
+    than a calendar count.
+
+    This endpoint is not scoped to your organisation, so ``scope=True`` (the
+    default) keeps only users on a project you administer -- a much larger row
+    count across the whole machine otherwise.
+    """
     frame = load(source, ["openportal-allocation-user-usage"])["openportal-allocation-user-usage"]
     if frame.is_empty():
         return frame
 
-    frame = integral(numeric(frame, "node_usage"), "year", "month")
+    frame = integral(numeric(frame, "node_usage"), "year", "month").with_columns(
+        unix_username=pl.col("username").str.split(".").list.first(),
+        project_code=project_code("username"),
+    )
     if year is not None:
         frame = frame.filter(pl.col("year") == year)
+    if scope:
+        codes = in_scope(source)["project_code"].to_list()
+        frame = frame.filter(pl.col("project_code").is_in(codes))
 
     return (
-        frame.group_by("username", "full_name")
+        frame.group_by("unix_username", "full_name")
         .agg(
             total_node_usage=pl.col("node_usage").sum(),
+            projects=pl.col("project_code").unique().sort().str.join(", "),
             months_active=pl.col("node_usage").filter(pl.col("node_usage") > 0).len(),
             first_year=pl.col("year").min(),
             last_year=pl.col("year").max(),
@@ -155,8 +301,13 @@ def user_usage(source: Snapshot | WaldurClient, *, year: int | None = None) -> p
 def queue(source: Snapshot | WaldurClient) -> pl.DataFrame:
     """Daily job counts and mean queue wait, unpacked from the usage reports.
 
-    The ``report`` payload nests a per-day dictionary inside each monthly row;
-    this flattens it to one row per project/resource/day.
+    ``openportal-project-usage-reports`` returns one row per project, resource
+    and month, with a free-form ``report`` blob nesting a dictionary per day.
+    This is the only report that reshapes rather than selects: it explodes that
+    blob to one row per project/resource/day, passing ``num_jobs`` and
+    ``total_wait_seconds`` through untouched. ``mean_wait_seconds`` is their
+    quotient (null on a day with no jobs, rather than a division by zero) and
+    ``distinct_users`` is the length of the day's ``user_job_counts`` map.
     """
     frame = load(source, ["openportal-project-usage-reports"])["openportal-project-usage-reports"]
     if frame.is_empty():
@@ -197,3 +348,6 @@ REPORTS = {
     "user-usage": user_usage,
     "queue": queue,
 }
+
+#: Reports whose signature accepts ``scope=``, so the CLI can offer ``--all``.
+SCOPED = {"membership", "user-usage"}

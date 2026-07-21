@@ -10,10 +10,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .cache import DEFAULT_ENDPOINTS, Snapshot, pull
-from .client import WaldurClient
+from .cache import DEFAULT_ENDPOINTS, Snapshot, SnapshotError, available, pull
+from .client import WaldurClient, WaldurError
 from .config import MissingTokenError, Settings
-from .reports import REPORTS
+from .reports import REPORTS, SCOPED
 
 app = typer.Typer(
     add_completion=False,
@@ -29,7 +29,8 @@ def _render(frame: pl.DataFrame, title: str, limit: int) -> None:
         console.print(f"[yellow]{title}: no rows[/]")
         return
 
-    shown = frame.head(limit)
+    # --limit 0 means "all of it".
+    shown = frame if limit <= 0 else frame.head(limit)
     table = Table(title=title, header_style="bold")
     for column in shown.columns:
         numeric_column = shown.schema[column].is_numeric()
@@ -37,8 +38,22 @@ def _render(frame: pl.DataFrame, title: str, limit: int) -> None:
     for row in shown.iter_rows():
         table.add_row(*("" if value is None else _fmt(value) for value in row))
     console.print(table)
-    if frame.height > limit:
-        console.print(f"[dim]... {frame.height - limit} more rows (use --limit)[/]")
+    if shown.height < frame.height:
+        console.print(
+            f"[dim]... {frame.height - shown.height} more rows (--limit N, or --limit 0 for all)[/]"
+        )
+
+
+def _sorted(frame: pl.DataFrame, columns: list[str], descending: bool) -> pl.DataFrame:
+    """Re-sort a report, replacing whatever order it chose for itself."""
+    unknown = [column for column in columns if column not in frame.columns]
+    if unknown:
+        error_console.print(
+            f"[red]No such column(s): {', '.join(unknown)}. "
+            f"Available: {', '.join(frame.columns)}[/]"
+        )
+        raise typer.Exit(2)
+    return frame.sort(columns, descending=descending, nulls_last=True)
 
 
 def _fmt(value: object) -> str:
@@ -89,7 +104,12 @@ def snapshot(
     name: Annotated[str | None, typer.Option(help="Snapshot directory name")] = None,
     root: Annotated[Path | None, typer.Option(help="Override the cache directory")] = None,
 ) -> None:
-    """Pull endpoints in full and store them as parquet."""
+    """Refresh the cache: pull endpoints in full and store them as parquet.
+
+    This is the only way the cache is ever written. Each run creates a new
+    timestamped directory holding a complete re-fetch; nothing is merged into
+    an existing snapshot. `report` then reads the newest one.
+    """
     with WaldurClient() as client:
         target, counts = pull(client, which or list(DEFAULT_ENDPOINTS), root=root, name=name)
     table = Table(title=f"Snapshot {target.path}", header_style="bold")
@@ -101,27 +121,75 @@ def snapshot(
 
 
 @app.command()
+def snapshots(
+    root: Annotated[Path | None, typer.Option(help="Override the cache directory")] = None,
+) -> None:
+    """List the snapshots on disk, newest last."""
+    directory = root or Settings.from_env().cache_dir
+    found = available(directory)
+    if not found:
+        console.print(f"[yellow]No snapshots under {directory}. Run 'waldur-tools snapshot'.[/]")
+        return
+    table = Table(title=f"Snapshots in {directory}", header_style="bold")
+    table.add_column("name")
+    table.add_column("created")
+    table.add_column("rows", justify="right")
+    for snap in found:
+        meta = snap.meta
+        endpoints_meta = meta.get("endpoints")
+        total = sum(endpoints_meta.values()) if isinstance(endpoints_meta, dict) else 0
+        table.add_row(snap.path.name, str(meta.get("created", "")), f"{total:,}")
+    console.print(table)
+
+
+@app.command()
 def report(
     which: Annotated[str, typer.Argument(help=f"One of: {', '.join(REPORTS)}")],
-    live: Annotated[bool, typer.Option(help="Query the API instead of a snapshot")] = False,
-    limit: Annotated[int, typer.Option(help="Rows to display")] = 25,
+    live: Annotated[
+        bool, typer.Option(help="Query the API directly; does not touch the cache")
+    ] = False,
+    use: Annotated[
+        str | None, typer.Option(help="Snapshot name to read (default: the newest)")
+    ] = None,
+    all_: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Include projects outside your administrative scope (membership, user-usage)",
+        ),
+    ] = False,
+    sort: Annotated[list[str] | None, typer.Option(help="Sort by these columns, in order")] = None,
+    desc: Annotated[bool, typer.Option("--desc", help="Sort descending")] = False,
+    limit: Annotated[int, typer.Option(help="Rows to display; 0 for all")] = 25,
     output: Annotated[
         Path | None, typer.Option("-o", "--output", help="Write to .csv/.json/.parquet")
     ] = None,
     root: Annotated[Path | None, typer.Option(help="Override the cache directory")] = None,
 ) -> None:
-    """Run an analysis over snapshotted (or live) data."""
+    """Run an analysis over cached (or live) data.
+
+    Reads the newest snapshot by default. Use `snapshot` to refresh it, `--use`
+    to pin an older one, or `--live` to bypass the cache entirely.
+    """
     if which not in REPORTS:
         error_console.print(f"[red]Unknown report {which!r}. Choose from: {', '.join(REPORTS)}[/]")
         raise typer.Exit(2)
+    if all_ and which not in SCOPED:
+        error_console.print(f"[red]--all applies only to: {', '.join(sorted(SCOPED))}[/]")
+        raise typer.Exit(2)
 
+    kwargs = {"scope": False} if all_ else {}
     if live:
         with WaldurClient() as client:
-            frame = REPORTS[which](client)
+            frame = REPORTS[which](client, **kwargs)
     else:
         settings = Settings.from_env()
-        frame = REPORTS[which](Snapshot.latest(root or settings.cache_dir))
+        directory = root or settings.cache_dir
+        source = Snapshot.named(directory, use) if use else Snapshot.latest(directory)
+        frame = REPORTS[which](source, **kwargs)
 
+    if sort:
+        frame = _sorted(frame, sort, desc)
     _render(frame, which, limit)
     if output is not None:
         _write(frame, output)
@@ -140,10 +208,14 @@ def whoami() -> None:
 
 
 def main() -> None:
-    """Entry point that turns expected failures into clean messages."""
+    """Entry point that turns expected failures into clean messages.
+
+    A missing token, an absent snapshot and a rejected request are all things
+    the user can fix; a traceback for any of them is noise.
+    """
     try:
         app()
-    except MissingTokenError as error:
+    except (MissingTokenError, SnapshotError, WaldurError) as error:
         error_console.print(f"[red]{error}[/]")
         raise SystemExit(2) from error
 

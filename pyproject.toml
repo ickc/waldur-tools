@@ -39,6 +39,10 @@ packages = ["src/waldur_tools"]
 
 # --------------------------------------------------------------------------
 # pixi
+#
+# One environment, deliberately. This package exists for the people who
+# maintain it, so splitting the test and lint dependencies into a separate
+# feature only bought us typing `-e dev` on every single command.
 # --------------------------------------------------------------------------
 
 [tool.pixi.workspace]
@@ -50,27 +54,24 @@ python = ">=3.11,<3.14"
 
 [tool.pixi.pypi-dependencies]
 waldur-tools = { path = ".", editable = true }
-
-[tool.pixi.environments]
-default = { solve-group = "default" }
-dev = { features = ["dev"], solve-group = "default" }
-
-[tool.pixi.feature.dev.pypi-dependencies]
 pytest = ">=8.0"
 pytest-cov = ">=5.0"
 mypy = ">=1.10"
 ruff = ">=0.6"
 respx = ">=0.21"
 
-[tool.pixi.feature.dev.tasks]
+# Runs on every `pixi run` and `pixi shell`, and is where the API token comes
+# from -- so pixi on its own is enough to use this tool. direnv is optional.
+[tool.pixi.activation]
+scripts = ["scripts/activate.sh"]
+
+[tool.pixi.tasks]
+cli = "waldur-tools"
 test = "pytest"
 lint = "ruff check src tests"
 fmt = "ruff format src tests"
 typecheck = "mypy src"
 check = { depends-on = ["lint", "typecheck", "test"] }
-
-[tool.pixi.tasks]
-cli = "waldur-tools"
 
 # --------------------------------------------------------------------------
 # tooling
