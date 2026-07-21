@@ -1,0 +1,27 @@
+# --- secrets: never commit ---
+.envrc.local
+*.token
+.env
+
+# pixi
+.pixi/
+pixi.lock.bak
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# local data snapshots
+data/
+*.parquet

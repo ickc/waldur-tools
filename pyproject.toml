@@ -1,0 +1,106 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "waldur-tools"
+version = "0.1.0"
+description = "Snapshot, analyse and report on Waldur / Isambard portal data"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Kolen Cheung" }]
+license = { text = "BSD-3-Clause" }
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = [
+    "waldur-api-client>=8.0.9",
+    "polars>=1.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "mypy>=1.10",
+    "ruff>=0.6",
+    "respx>=0.21",
+]
+
+[project.scripts]
+waldur-tools = "waldur_tools.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/waldur_tools"]
+
+# --------------------------------------------------------------------------
+# pixi
+# --------------------------------------------------------------------------
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-aarch64", "linux-64", "osx-arm64"]
+
+[tool.pixi.dependencies]
+python = ">=3.11,<3.14"
+
+[tool.pixi.pypi-dependencies]
+waldur-tools = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.feature.dev.pypi-dependencies]
+pytest = ">=8.0"
+pytest-cov = ">=5.0"
+mypy = ">=1.10"
+ruff = ">=0.6"
+respx = ">=0.21"
+
+[tool.pixi.feature.dev.tasks]
+test = "pytest"
+lint = "ruff check src tests"
+fmt = "ruff format src tests"
+typecheck = "mypy src"
+check = { depends-on = ["lint", "typecheck", "test"] }
+
+[tool.pixi.tasks]
+cli = "waldur-tools"
+
+# --------------------------------------------------------------------------
+# tooling
+# --------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]
+
+[tool.ruff.lint.isort]
+# conftest is imported by name, since tests are not a package.
+known-first-party = ["waldur_tools", "conftest"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+# The generated Waldur client is not typed to strict standards.
+[[tool.mypy.overrides]]
+module = ["waldur_api_client.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
