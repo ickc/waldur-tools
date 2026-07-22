@@ -20,6 +20,9 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.0",
     "platformdirs>=4.0",
+    # Only the figure builder and its offline bundle; `viz` inlines plotly.js
+    # into the HTML so the report opens with no network and no server.
+    "plotly>=5.22",
 ]
 
 [project.optional-dependencies]
@@ -96,9 +99,9 @@ known-first-party = ["waldur_tools", "conftest"]
 python_version = "3.11"
 strict = true
 warn_unused_ignores = true
-# The generated Waldur client is not typed to strict standards.
+# Neither the generated Waldur client nor plotly ships type information.
 [[tool.mypy.overrides]]
-module = ["waldur_api_client.*"]
+module = ["waldur_api_client.*", "plotly.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 

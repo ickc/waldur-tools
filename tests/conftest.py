@@ -115,6 +115,17 @@ def users():
 
 
 @pytest.fixture
+def projects():
+    """Only ``created`` and ``customer_name`` matter: the viz counts projects
+    that existed by each month against the ones that ran something."""
+    return [
+        {"name": "Project A", "customer_name": "UKRI", "created": "2025-01-05T00:00:00+00:00"},
+        {"name": "Project B", "customer_name": "UKRI", "created": "2026-01-05T00:00:00+00:00"},
+        {"name": "Elsewhere", "customer_name": "Other Uni", "created": "2024-01-05T00:00:00+00:00"},
+    ]
+
+
+@pytest.fixture
 def accounting_summary():
     return [
         {
@@ -150,6 +161,14 @@ def user_usage_rows():
             "username": "alice.abc1.brics",
             "full_name": "Alice",
             "node_usage": "2.5",
+            "year": 2026,
+            "month": 2,
+        },
+        # A second project of ours, so monthly aggregation has more than one.
+        {
+            "username": "bob.abc2.brics",
+            "full_name": "Bob",
+            "node_usage": "1.0",
             "year": 2026,
             "month": 2,
         },

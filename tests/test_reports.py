@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+from datetime import date
 
+import polars as pl
 import pytest
 
 from waldur_tools import reports
@@ -131,7 +133,7 @@ def test_user_usage_sums_across_months_and_keeps_years_integral(snapshot):
 
 def test_user_usage_scopes_out_other_organisations(snapshot):
     """Carol has the heaviest usage but is not ours; scope must drop her."""
-    assert reports.user_usage(snapshot)["unix_username"].to_list() == ["alice"]
+    assert reports.user_usage(snapshot)["unix_username"].to_list() == ["alice", "bob"]
     assert "carol" in reports.user_usage(snapshot, scope=False)["unix_username"].to_list()
 
 
@@ -174,3 +176,54 @@ def test_reports_registry_matches_module(snapshot):
     for name, fn in reports.REPORTS.items():
         assert callable(fn), name
     assert set(reports.REPORTS) >= reports.SCOPED
+
+
+# -- monthly -----------------------------------------------------------------
+
+
+def test_monthly_totals_entitlement_follows_month_length(snapshot):
+    """Our share is nodes x fraction held for every hour, so February is smaller."""
+    frame = reports.monthly_totals(snapshot, nodes=10, share=0.5, customer="UKRI")
+    by_month = {row["month"]: row for row in frame.iter_rows(named=True)}
+    january = by_month[date(2025, 1, 1)]
+    february = by_month[date(2026, 2, 1)]
+    assert january["entitlement_node_hours"] == pytest.approx(5 * 24 * 31)
+    assert february["entitlement_node_hours"] == pytest.approx(5 * 24 * 28)
+    assert january["node_hours"] == pytest.approx(1.5)
+    assert january["pct_of_entitlement"] == pytest.approx(100 * 1.5 / 3720)
+    assert january["mean_nodes"] == pytest.approx(1.5 / (24 * 31))
+
+
+def test_monthly_totals_counts_only_people_who_ran(snapshot):
+    frame = reports.monthly_totals(snapshot, customer="UKRI")
+    row = frame.filter(pl.col("month") == date(2025, 1, 1)).row(0, named=True)
+    assert row["active_users"] == 1
+    assert row["active_projects"] == 1
+
+
+def test_monthly_excludes_other_organisations(snapshot):
+    """Carol's project is on the machine but not ours; UKRI's own rows survive."""
+    ours = reports.monthly(snapshot, customer="UKRI")
+    assert "zzz" not in ours["project_code"].to_list()
+    assert "abc1" in ours["project_code"].to_list()
+
+
+def test_monthly_customer_filter_can_exclude_everything(snapshot):
+    assert reports.monthly(snapshot, customer="No Such Organisation").is_empty()
+
+
+def test_monthly_marks_only_the_snapshot_month_as_partial(snapshot, monkeypatch):
+    """A snapshot taken mid-month holds a partial month; nothing else is."""
+    snapshot.write_meta({})  # written now, so "today" is the partial month
+    frame = reports.monthly_totals(snapshot, customer="UKRI")
+    assert frame["is_partial"].sum() <= 1
+    today = reports.as_of(snapshot)
+    assert today == date.today()
+
+
+def test_as_of_reads_the_snapshot_date(tmp_path):
+    from waldur_tools.cache import Snapshot
+
+    snap = Snapshot.create(tmp_path, "dated")
+    (snap.path / "meta.json").write_text('{"created": "2026-03-15T09:00:00+00:00"}')
+    assert reports.as_of(snap) == date(2026, 3, 15)

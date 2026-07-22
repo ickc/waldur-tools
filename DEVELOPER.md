@@ -8,17 +8,22 @@ a number, or change one.
 
 **Almost nothing is computed.** Every report selects columns straight from one
 or two endpoints and renames a few. The derived columns are listed in full
-below — there are eleven of them across five reports, all arithmetic you could
-do in your head. No imputation, no smoothing, no filling of missing values, no
-inferred rows.
+below, all arithmetic you could do in your head. No imputation, no smoothing,
+no filling of missing values, no inferred rows.
 
-The two things that are *not* pass-through, and that you should know about
-before quoting a figure:
+The things that are *not* pass-through, and that you should know about before
+quoting a figure:
 
 1. **Scoping.** `membership` and `user-usage` drop rows for projects you do not
-   administer, by default. See [Administrative scope](#administrative-scope).
+   administer, by default; `monthly`, `monthly-totals` and the visual report go
+   further and keep one organisation. See
+   [Administrative scope](#administrative-scope).
 2. **`queue` reshapes.** It explodes a nested JSON blob into one row per day.
    The numbers inside are untouched.
+3. **The monthly reports introduce a denominator the portal does not have.**
+   `entitlement_node_hours` is `nodes * share * 24 * days_in_month` — a figure
+   assembled from two numbers you pass in, not one the API returns. See
+   [The share, and what it assumes](#the-share-and-what-it-assumes).
 
 Everything else is the portal's own view, rearranged into a table.
 
@@ -83,6 +88,17 @@ so an unsupported filter looks exactly like a filter that matched everything.
 Do not trust a filter you have not verified changes the count.
 
 Pass `--all` (CLI) or `scope=False` (library) to opt out.
+
+**The monthly reports narrow it once more.** Of the project codes a
+GW4-partner token administers, most belong to that partner and a few do not:
+other, separately funded projects that share the same token. So `monthly`,
+`monthly_totals` and `viz.render` take a `customer` argument, defaulting to
+`reports.DEFAULT_CUSTOMER`, and filter to that organisation's projects.
+Counting the other ones in would inflate the very share the report exists to
+measure. `--all`, `scope=False` or `customer=None` widens it back to every
+code administered — which is as wide as these reports can honestly go, since
+usage rows for *other* organisations arrive with project codes that resolve
+to no name, no customer and no limit.
 
 ## Derived columns, in full
 
@@ -165,6 +181,65 @@ the cluster, not whether anyone is using it. Every allocation in normal
 operation reads `OK`. `is_active` is the separate question of whether the
 allocation is switched on.
 
+### `monthly` and `monthly-totals` — from `openportal-allocation-user-usage`
+
+The only endpoint with a time axis, and therefore the base of every figure in
+the visual report. One source row per user, allocation and calendar month.
+`monthly` groups by month and project; `monthly-totals` groups by month alone.
+Neither is derivable from the other: distinct users per month cannot be
+recovered by summing a per-project user count, so both aggregate the same
+private base frame (`reports._monthly_rows`).
+
+| Column | Derivation |
+| --- | --- |
+| `month` | `date(year, month, 1)` from the two integer columns |
+| `node_hours` | `sum(node_usage)` — cumulative-safe here, unlike the same-named field on allocations |
+| `active_users` | distinct `unix_username` **with non-zero usage**, so it reads as "who ran", not "who could have" |
+| `active_projects` | distinct project codes with non-zero usage (totals only) |
+| `projects_with_usage_rows` | distinct project codes reporting *at all* that month, zero included — the gap against `active_projects` is projects that existed and ran nothing (totals only) |
+| `entitlement_node_hours` | `nodes * share * 24 * days_in_month` — see below |
+| `pct_of_entitlement` | `100 * node_hours / entitlement_node_hours` |
+| `mean_nodes` | `node_hours / (24 * days_in_month)`: nodes running, averaged over the month |
+| `unused_node_hours` | `entitlement - node_hours`, negative when we went over (totals only) |
+| `is_partial` | the month the data was taken in (totals only) |
+
+On `monthly`, `pct_of_entitlement` measures **one project against the whole
+organisation's share** — "how much of our slice did this project alone account
+for?". It is not a per-project quota; nothing in the portal allocates the share
+out to projects, and the columns will not sum to a project's own limit.
+
+`is_partial` comes from `reports.as_of()`, which reads `created` out of the
+snapshot's `meta.json` (falling back to today for a live client). A snapshot
+taken on the 21st holds three weeks of that month, and averaging it in beside
+complete months drags every headline down; the report marks it instead of
+dropping it, and the visual report hatches that column and excludes it from the
+cumulative figure and every average.
+
+### The share, and what it assumes
+
+Two assumptions sit under `entitlement_node_hours`, and neither comes from the
+API.
+
+**The machine and the share.** Isambard 3 has 384 compute nodes and the share
+held here is 10% of them: `TOTAL_NODES` and `DEFAULT_SHARE` in `reports`, both
+overridable per call and from `--nodes` / `--share`. If either changes, change
+the constant rather than the arithmetic.
+
+**The unit.** The portal calls the field `node_usage` and never states what it
+counts. Everything here reads it as **node hours**, which is what makes
+`38.4 nodes × 24 h × days` the right comparison. The reading is not arbitrary —
+`node_usage` matches `current_month_spend` to the penny, credits are billed per
+node-hour on this deployment, and the resulting percentages land in a plausible
+band rather than orders of magnitude off. But it is a reading. If it
+turns out to be node *days*, every percentage in the report is ~24× too small,
+while the shape of every curve is unchanged.
+
+**Above 100% is not an error.** The share is an average entitlement, not a
+quota: SLURM fair-share lets a busy month borrow capacity nobody else claimed.
+Some months in a snapshot exceed it, occasionally by a wide margin. This is
+the opposite of `utilisation.month_vs_limit_pct`, which *cannot* exceed 100%
+because its denominator is a node limit that tracks the remaining balance.
+
 ### `user-usage` — from `openportal-allocation-user-usage`
 
 One source row per user, allocation and calendar month. Grouped by
@@ -194,6 +269,67 @@ figures. Output is one row per project/resource/day.
 | `distinct_users` | `len(user_job_counts)` for that day |
 
 monthly rows expand roughly thirtyfold into daily ones.
+
+## The visual report
+
+`waldur_tools.viz` builds the HTML page. `render()` returns a string rather than
+writing a file, so a notebook can hand it to `IPython.display.HTML`; the CLI is
+the only thing that touches disk. Every figure is a plain
+`plotly.graph_objects.Figure` and is exported individually, so a single one can
+be pulled into a slide deck without the page around it.
+
+**Why one HTML file and not a Dash app.** The audience for this is a committee
+and an allocation review, not a terminal. A Dash app needs a process, a port and
+a host that is up when someone clicks the link; a file with plotly.js inlined
+opens offline, five years from now, on a laptop that never had this tool
+installed. `get_plotlyjs()` supplies the bundle, which is ~4.5 MB of the ~5 MB
+page. **The bundle must be emitted in `<head>`, before the figures** — plotly
+writes a `Plotly.newPlot` call inline beside each div, and those run as the
+parser reaches them, so a bundle at the end of `<body>` yields a page of blank
+boxes and no error.
+
+### Rules the figures follow
+
+These are not stylistic preferences; each one is there because the alternative
+misleads. A change that undoes one of them should be deliberate.
+
+- **No figure has a second y-axis.** Two measures on two scales invent a
+  correlation out of where the axes happen to line up. Where a figure could show
+  more than one measure, it carries *buttons* that rewrite the single axis
+  (`viz._buttons`). This is also how absolute and relative views coexist:
+  node hours, % of share, average nodes, % of the month.
+- **Colour is assigned by entity, in fixed slot order.** `viz.SERIES` is a
+  seven-slot palette validated for colour-vision deficiency — worst adjacent
+  pair ΔE 9.1 light / 8.4 dark against a floor of 8, checked with a validator
+  rather than by eye. The order is the safety mechanism, so slots are taken in
+  order and an eighth hue is never generated. Past seven projects the tail folds
+  into a neutral "Other" band (`viz._ranked`), which is why `keep=7` and not
+  more.
+- **Both themes are selected, not flipped.** Every colour is a
+  `(light, dark)` pair; the page swaps by hex lookup in the browser
+  (`_swap_map`), which is why *any colour a figure draws must appear in
+  `SERIES` or `CHROME`* — one that does not will silently stay in its light step
+  on a dark surface. `tests/test_viz.py` checks that.
+- **Every figure has a table view.** Three of the light-mode series colours sit
+  below 3:1 contrast against the surface; the documented relief for that is a
+  readable table, so it is not optional decoration.
+- **The heatmap is log-scaled.** A month of production is three orders of
+  magnitude above a test job, and on a linear ramp everything but the peak
+  renders as empty. Colour is `log10(1 + node_hours)`; the colourbar is
+  relabelled `0, 10, 100, 1k, 10k` and the hover shows the real figure.
+- **Sequential where the question is magnitude, categorical where it is
+  identity.** The heatmap and the per-project totals bar are one hue; only the
+  stacked figure and the engagement lines tell series apart.
+
+### Supporting series
+
+Two things the monthly reports do not carry:
+
+| Function | Source | Why |
+| --- | --- | --- |
+| `projects_existing` | `projects.created` | The denominator behind "how many of the projects that existed ran something". Without it the active-project line reads as a plateau instead of a fraction. Returns empty rather than raising if `projects` is missing from an older snapshot, so the other six figures still render. |
+| `people_with_access` | `reports.membership` | The denominator behind "how many of the people with access ran something". Access granted and never exercised is invisible in the usage endpoint, which only knows about people who ran. |
+| `queue_monthly` | `reports.queue` | Rolls the daily queue report up to months. `mean_wait_hours` is total wait over total jobs, **not** the mean of daily means — a day with three jobs should not weigh as much as a day with three thousand. |
 
 ## The cache
 
@@ -257,3 +393,13 @@ fixtures in `tests/conftest.py` deliberately reproduce the awkward parts of the
 real data: a project with two service allocations, an association pointing at an
 allocation the token cannot see, another organisation's user, and a row the
 portal blanked entirely. If a change survives those, it survives the portal.
+
+`tests/test_viz.py` renders the whole page once (module-level cache — it is 5 MB)
+and asserts the properties that are easy to lose in a refactor and invisible in
+a diff: nothing is fetched at view time, no figure declares a `yaxis2`, both
+scales are offered, table views exist, and every palette colour has a dark step.
+
+**None of that catches a blank plot.** The bundle-ordering bug above passed every
+assertion in this file — the markup was correct and the JavaScript threw no
+error, the figures simply never drew. If you change how the page is assembled,
+open it, or screenshot it headlessly, before believing the suite.

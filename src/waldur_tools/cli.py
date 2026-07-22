@@ -10,10 +10,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from . import viz as viz_report
 from .cache import DEFAULT_ENDPOINTS, Snapshot, SnapshotError, available, pull
 from .client import WaldurClient, WaldurError
 from .config import MissingTokenError, Settings
-from .reports import REPORTS, SCOPED
+from .reports import DEFAULT_CUSTOMER, DEFAULT_SHARE, REPORTS, SCOPED, TOTAL_NODES
 
 app = typer.Typer(
     add_completion=False,
@@ -193,6 +194,42 @@ def report(
     _render(frame, which, limit)
     if output is not None:
         _write(frame, output)
+
+
+@app.command()
+def viz(
+    output: Annotated[
+        Path, typer.Option("-o", "--output", help="Where to write the HTML report")
+    ] = Path("isambard-utilisation.html"),
+    nodes: Annotated[int, typer.Option(help="Compute nodes in the machine")] = TOTAL_NODES,
+    share: Annotated[float, typer.Option(help="Our fraction of it, e.g. 0.10")] = DEFAULT_SHARE,
+    customer: Annotated[
+        str, typer.Option(help="Organisation to report on; '' for every visible project")
+    ] = DEFAULT_CUSTOMER,
+    live: Annotated[bool, typer.Option(help="Query the API directly instead of the cache")] = False,
+    use: Annotated[
+        str | None, typer.Option(help="Snapshot name to read (default: the newest)")
+    ] = None,
+    root: Annotated[Path | None, typer.Option(help="Override the cache directory")] = None,
+) -> None:
+    """Write a self-contained HTML report on how much of our share we are using.
+
+    One file, plotly.js inlined: it opens offline, needs no server, and can be
+    sent to someone who will never run this tool. The numbers are the same ones
+    `report monthly` and `report monthly-totals` print.
+    """
+    if live:
+        with WaldurClient() as client:
+            page = viz_report.render(client, nodes=nodes, share=share, customer=customer or None)
+    else:
+        directory = root or Settings.from_env().cache_dir
+        source = Snapshot.named(directory, use) if use else Snapshot.latest(directory)
+        page = viz_report.render(source, nodes=nodes, share=share, customer=customer or None)
+
+    output.write_text(page, encoding="utf-8")
+    console.print(
+        f"[green]Wrote {output}[/] ({len(page) / 1_048_576:.1f} MB) — open it in a browser"
+    )
 
 
 @app.command()

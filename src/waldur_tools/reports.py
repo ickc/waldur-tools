@@ -15,7 +15,9 @@ the portal returns those rows with most fields blanked out. See :func:`in_scope`
 
 from __future__ import annotations
 
+import calendar
 import json
+from datetime import date
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -26,6 +28,17 @@ from .frames import integral, numeric
 if TYPE_CHECKING:
     from .cache import Snapshot
     from .client import WaldurClient
+
+#: Compute nodes in Isambard 3 phase 1, the machine the usage figures describe.
+TOTAL_NODES = 384
+
+#: The GW4 partner share of that machine held by this organisation.
+DEFAULT_SHARE = 0.10
+
+#: The customer whose projects count as "ours" in :func:`monthly`. The portal
+#: also shows other, separately funded projects administered by the same
+#: token, which would inflate our own share if counted in.
+DEFAULT_CUSTOMER = "University of Exeter"
 
 
 def project_code(column: str) -> pl.Expr:
@@ -249,6 +262,184 @@ def utilisation(source: Snapshot | WaldurClient) -> pl.DataFrame:
     )
 
 
+def as_of(source: Snapshot | WaldurClient) -> date:
+    """The day the data describes: a snapshot's creation date, or today if live.
+
+    Only used to decide which month is still in progress. A snapshot taken on
+    the 21st holds three weeks of that month, and averaging it in alongside
+    complete months would drag every headline down.
+    """
+    created = getattr(source, "meta", {}).get("created") if hasattr(source, "meta") else None
+    if isinstance(created, str):
+        try:
+            return date.fromisoformat(created[:10])
+        except ValueError:
+            pass
+    return date.today()
+
+
+def _monthly_rows(
+    source: Snapshot | WaldurClient,
+    *,
+    customer: str | None = DEFAULT_CUSTOMER,
+    scope: bool = True,
+) -> pl.DataFrame:
+    """Per user, project and month node usage for the projects we count as ours.
+
+    The shared base of :func:`monthly` and :func:`monthly_totals`. Both need the
+    same rows but aggregate them differently -- distinct users per month cannot
+    be recovered by summing a per-project user count, so neither report can be
+    derived from the other.
+
+    ``scope=False`` widens ``customer`` to every project the token administers,
+    which is as wide as these reports can honestly go: usage rows for other
+    organisations do arrive, but their project codes resolve to no name, no
+    customer and no node limit, so there is nothing to attribute them to.
+    """
+    if not scope:
+        customer = None
+    frame = load(source, ["openportal-allocation-user-usage"])["openportal-allocation-user-usage"]
+    if frame.is_empty():
+        return pl.DataFrame(
+            schema={
+                "month": pl.Date,
+                "project_code": pl.String,
+                "project_name": pl.String,
+                "customer_name": pl.String,
+                "unix_username": pl.String,
+                "node_usage": pl.Float64,
+            }
+        )
+
+    projects = in_scope(source).drop("project_uuid")
+    if customer is not None:
+        projects = projects.filter(pl.col("customer_name") == customer)
+
+    frame = integral(numeric(frame, "node_usage"), "year", "month").with_columns(
+        project_code=project_code("username"),
+        unix_username=pl.col("username").str.split(".").list.first(),
+    )
+    return (
+        frame.join(projects, on="project_code", how="inner")
+        .with_columns(
+            month=pl.date(pl.col("year"), pl.col("month"), 1),
+        )
+        .select(
+            "month",
+            "project_code",
+            "project_name",
+            "customer_name",
+            "unix_username",
+            "node_usage",
+        )
+        .drop_nulls("month")
+    )
+
+
+def _entitlement(nodes: int, share: float) -> pl.Expr:
+    """Node hours our share of the machine is worth in a given calendar month.
+
+    ``nodes * share`` nodes held for every hour of the month. It is an average
+    entitlement rather than a cap: SLURM fair-share lets a busy month borrow
+    capacity nobody else claimed, which is why the percentage can exceed 100.
+    """
+    days = pl.col("month").map_elements(
+        lambda value: calendar.monthrange(value.year, value.month)[1],
+        return_dtype=pl.Int64,
+    )
+    return nodes * share * 24 * days
+
+
+def monthly(
+    source: Snapshot | WaldurClient,
+    *,
+    nodes: int = TOTAL_NODES,
+    share: float = DEFAULT_SHARE,
+    customer: str | None = DEFAULT_CUSTOMER,
+    scope: bool = True,
+) -> pl.DataFrame:
+    """Node hours per project per calendar month, against our share of the machine.
+
+    ``openportal-allocation-user-usage`` is the only endpoint with a time axis:
+    one row per user, allocation and month, and its ``node_usage`` *is*
+    cumulative-safe to sum, unlike the identically named field on
+    ``openportal-allocations``. This groups those rows by project and month.
+
+    ``entitlement_node_hours`` is the whole organisation's monthly share --
+    ``nodes * share * 24 * days_in_month``, so 384 nodes at 10% is roughly
+    28,570 node hours in a 31-day month -- and ``pct_of_entitlement`` measures
+    one project against all of it, answering "how much of our slice did this
+    project alone account for?". It is not a per-project quota; nothing in the
+    portal allocates the share out to projects.
+
+    ``customer`` restricts to one organisation's projects (ours by default);
+    ``scope=False``, or ``customer=None``, widens it to every project the token
+    administers -- which adds the separately funded UKRI and other, separately funded
+    projects, and so overstates our own share.
+    """
+    rows = _monthly_rows(source, customer=customer, scope=scope)
+    if rows.is_empty():
+        return rows
+
+    return (
+        rows.group_by("month", "project_code", "project_name", "customer_name")
+        .agg(
+            node_hours=pl.col("node_usage").sum(),
+            active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),
+        )
+        .with_columns(entitlement_node_hours=_entitlement(nodes, share))
+        .with_columns(
+            pct_of_entitlement=100 * pl.col("node_hours") / pl.col("entitlement_node_hours"),
+            mean_nodes=pl.col("node_hours") / (pl.col("entitlement_node_hours") / (nodes * share)),
+        )
+        .sort("month", "node_hours", descending=[False, True])
+    )
+
+
+def monthly_totals(
+    source: Snapshot | WaldurClient,
+    *,
+    nodes: int = TOTAL_NODES,
+    share: float = DEFAULT_SHARE,
+    customer: str | None = DEFAULT_CUSTOMER,
+    scope: bool = True,
+) -> pl.DataFrame:
+    """One row per month: how much of our share of the machine we actually used.
+
+    The headline series behind ``waldur-tools viz``. ``pct_of_entitlement`` is
+    the number the report is built around -- 100% means we ran, on average
+    across the month, exactly the ``nodes * share`` nodes our share is worth.
+
+    ``active_projects`` and ``active_users`` count only those with non-zero
+    usage, so they read as "who actually ran something", not "who could have".
+
+    ``is_partial`` marks the month the snapshot was taken in, which is
+    incomplete by construction and must be kept out of any average.
+    """
+    rows = _monthly_rows(source, customer=customer, scope=scope)
+    if rows.is_empty():
+        return rows
+
+    today = as_of(source)
+    return (
+        rows.group_by("month")
+        .agg(
+            node_hours=pl.col("node_usage").sum(),
+            active_projects=pl.col("project_code").filter(pl.col("node_usage") > 0).n_unique(),
+            active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),
+            projects_with_usage_rows=pl.col("project_code").n_unique(),
+        )
+        .with_columns(entitlement_node_hours=_entitlement(nodes, share))
+        .with_columns(
+            pct_of_entitlement=100 * pl.col("node_hours") / pl.col("entitlement_node_hours"),
+            mean_nodes=pl.col("node_hours") / (pl.col("entitlement_node_hours") / (nodes * share)),
+            unused_node_hours=pl.col("entitlement_node_hours") - pl.col("node_hours"),
+            is_partial=pl.col("month") == date(today.year, today.month, 1),
+        )
+        .sort("month")
+    )
+
+
 def user_usage(
     source: Snapshot | WaldurClient,
     *,
@@ -345,9 +536,11 @@ REPORTS = {
     "credits": credits,
     "membership": membership,
     "utilisation": utilisation,
+    "monthly": monthly,
+    "monthly-totals": monthly_totals,
     "user-usage": user_usage,
     "queue": queue,
 }
 
 #: Reports whose signature accepts ``scope=``, so the CLI can offer ``--all``.
-SCOPED = {"membership", "user-usage"}
+SCOPED = {"membership", "user-usage", "monthly", "monthly-totals"}
