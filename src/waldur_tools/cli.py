@@ -156,7 +156,9 @@ def report(
         bool,
         typer.Option(
             "--all",
-            help="Include projects outside your administrative scope (membership, user-usage)",
+            help=(
+                f"Include projects outside your administrative scope ({', '.join(sorted(SCOPED))})"
+            ),
         ),
     ] = False,
     sort: Annotated[list[str] | None, typer.Option(help="Sort by these columns, in order")] = None,

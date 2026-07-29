@@ -52,6 +52,7 @@ pixi run waldur-tools whoami                  # check auth + config
 pixi run waldur-tools endpoints --counts      # what this deployment exposes
 pixi run waldur-tools snapshot                # refresh the local cache (~9 min)
 pixi run waldur-tools report credits
+pixi run waldur-tools report reconcile        # does the usage match the invoices?
 pixi run waldur-tools report membership --limit 0            # every row
 pixi run waldur-tools report queue --sort num_jobs --desc -o queue.csv
 pixi run waldur-tools viz -o utilisation.html            # the visual report
@@ -66,13 +67,32 @@ pixi run waldur-tools viz -o utilisation.html            # the visual report
 | `utilisation` | Which allocations went unused *this month* against their node limit? |
 | `monthly` | Node hours per project per month, against our share of the machine |
 | `monthly-totals` | The same, one row per month: are we using our 10%? |
+| `reconcile` | Do those node hours agree with what the portal actually billed us? |
 | `user-usage` | Who are the heaviest users by cumulative node usage? |
 | `queue` | Daily job counts and mean queue wait, per project and resource |
 
 Common options: `--limit N` (`0` for all rows), `--sort COL --sort COL2`
 with `--desc`, `-o FILE.csv|.json|.parquet`, and `--all` on `membership`,
-`user-usage`, `monthly` and `monthly-totals` to lift the scope filter described
-below.
+`user-usage`, `monthly`, `monthly-totals` and `reconcile` to lift the scope
+filter described below.
+
+**Run `reconcile` before you quote anything from `monthly`, `monthly-totals` or
+`viz`.** It puts the node hours those three sum out of
+`openportal-allocation-user-usage` beside `incurred_costs` from `invoices` —
+the same node hours by a completely different route, since this deployment
+bills one credit per node hour — and prints one word per month:
+
+```
+month        node_hours   incurred_costs    difference   status
+2024-05       30,000.00        15,000.00     15,000.00   usage high
+2024-06       12,000.00        12,000.00          0.00   ok
+```
+
+(Illustrative — replace with your own snapshot's numbers.) `ok` means the two
+sides are within 1% of each other, and `usage high` / `usage low` mean the
+pull is the first thing to suspect — which is exactly the check that would
+have caught the paging bug described below, before an inflated headline
+could be read as a finding.
 
 The reports are thin: they select and rename columns from one or two endpoints
 and derive a handful of arithmetic ones. **[DEVELOPER.md](DEVELOPER.md) lists
@@ -140,8 +160,9 @@ you have and `report --use NAME` reads an older one.
 > `openportal-allocation-user-usage` was pulled by paging the whole table, which
 > that endpoint does not support; the result double-counted usage in every month
 > before the pull's last. Any command reading such a snapshot now fails with
-> `SnapshotError: ... rows repeat ...`. Take a fresh one — the numbers it
-> produces agree with the portal's own organisation dashboard.
+> `SnapshotError: ... rows repeat ...`. Take a fresh one, then run
+> `report reconcile`: the numbers a good snapshot produces agree with the
+> portal's own billing to within a small fraction of a percent.
 
 ### Administrative scope
 
@@ -180,6 +201,8 @@ everyone = reports.membership(client, scope=False)
 months = reports.monthly_totals(snapshot)              # the utilisation series
 figure = viz.figure_share(months, nodes=384, share=0.10)   # one plotly Figure
 HTML(viz.render(snapshot))                             # the whole page, inline
+
+checked = reports.reconcile(snapshot)          # one word per month, before quoting
 ```
 
 ## What the live data actually looks like
@@ -205,6 +228,15 @@ Findings from working against a live deployment, which shaped the reports:
   fetched a month at a time instead, and both the pull and every read are
   checked for repeated rows. Details in
   [DEVELOPER.md](DEVELOPER.md#one-endpoint-cannot-be-paged-straight-through).
+- `invoices.incurred_costs` is **the same node hours by another route**. Every
+  usage line on every invoice bills `1.0000000000` credits per hour, and
+  `incurred_costs` equals those lines' quantities summed, to the last decimal
+  place, on every one of them. That is what `reconcile` cross-checks against —
+  and it is the only second opinion with a time axis, since the other pair that
+  agrees (`allocations.node_usage` and `current_month_spend`) covers only the
+  month in progress. Do not use `price` or `total` for this: they are net of
+  the credit lines that zero a grant-funded invoice out, so an invoice can
+  bill thousands of node hours and show a `total` near zero.
 - Money and usage arrive as decimal *strings*, hence `frames.numeric`.
 - `slurm-*`, `events` and `keys` return empty; `support-issues` returns 424.
 - Unrecognised query parameters are silently ignored, so an unsupported filter

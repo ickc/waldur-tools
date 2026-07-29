@@ -6,6 +6,7 @@ from datetime import date
 import polars as pl
 import pytest
 
+from conftest import API_URL, invoice
 from waldur_tools import reports
 from waldur_tools.cache import Snapshot
 from waldur_tools.frames import to_frame
@@ -17,12 +18,14 @@ def snapshot(
     allocations,
     associations,
     accounting_summary,
+    invoices,
     usage_reports,
     user_usage_rows,
     users,
 ):
     snap = Snapshot.create(tmp_path, "test")
     snap.write("users", to_frame(users))
+    snap.write("invoices", to_frame(invoices))
     snap.write("openportal-allocations", to_frame(allocations))
     snap.write("openportal-associations", to_frame(associations))
     snap.write("openportal-accounting-summary", to_frame(accounting_summary))
@@ -219,6 +222,165 @@ def test_monthly_marks_only_the_snapshot_month_as_partial(snapshot, monkeypatch)
     assert frame["is_partial"].sum() <= 1
     today = reports.as_of(snapshot)
     assert today == date.today()
+
+
+# -- reconcile ---------------------------------------------------------------
+#
+# The second opinion on the usage endpoint. `cache.check` knows one way a pull
+# goes wrong -- a repeated row key -- and only for endpoints it holds a key for.
+# This compares the summed usage against what the portal billed for the same
+# month, which is arrived at by a different route and so catches anything that
+# leaves the totals wrong, whatever did it.
+
+
+def reconciling(tmp_path, name, allocations, usage_rows, invoice_rows):
+    """A snapshot holding just the three endpoints `reconcile` reads."""
+    snap = Snapshot.create(tmp_path, name)
+    snap.write("openportal-allocations", to_frame(allocations))
+    snap.write("openportal-allocation-user-usage", to_frame(usage_rows))
+    snap.write("invoices", to_frame(invoice_rows))
+    snap.write_meta({})
+    return snap
+
+
+def test_reconcile_agrees_when_the_pull_is_clean(snapshot):
+    frame = reports.reconcile(snapshot, customer="UKRI")
+    by_month = {row["month"]: row for row in frame.iter_rows(named=True)}
+    january = by_month[date(2025, 1, 1)]
+    assert january["node_hours"] == pytest.approx(1.5)
+    assert january["incurred_costs"] == pytest.approx(1.5)
+    assert january["difference"] == pytest.approx(0.0)
+    assert january["status"] == "ok"
+    assert by_month[date(2026, 2, 1)]["status"] == "ok"
+    assert by_month[date(2026, 2, 1)]["invoice_state"] == "pending"
+
+
+def test_reconcile_reads_incurred_costs_not_the_zeroed_total(snapshot):
+    """`price` and `total` are net of a credit line; only `incurred_costs` bills."""
+    assert reports.invoiced(snapshot, customer="UKRI")["incurred_costs"].sum() == pytest.approx(5.0)
+
+
+def test_reconcile_leaves_out_another_organisations_invoice(snapshot):
+    """Carol's 99.0 belongs to an invoice that is not ours, and must not net off."""
+    frame = reports.reconcile(snapshot, customer="UKRI")
+    february = frame.filter(pl.col("month") == date(2026, 2, 1)).row(0, named=True)
+    assert february["incurred_costs"] == pytest.approx(3.5)
+
+
+def test_reconcile_catches_a_month_counted_twice(tmp_path, allocations, invoices):
+    """The bug this report exists for: usage summed high against the invoice.
+
+    The rows here pass `cache.check` -- Project A holds two allocations, so a
+    row on each is legitimate -- and still double the month. A guard keyed on
+    the row identity cannot see that; the invoice can.
+    """
+    doubled = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/{alloc}/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "50.0",
+            "year": 2025,
+            "month": 1,
+        }
+        for alloc in ("aaa", "aaa2")
+    ]
+    snap = reconciling(tmp_path, "doubled", allocations, doubled, [invoice(2025, 1, 50.0)])
+
+    row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
+    assert row["status"] == "usage high"
+    assert row["difference"] == pytest.approx(50.0)
+    assert row["pct_difference"] == pytest.approx(100.0)
+
+
+def test_reconcile_catches_a_month_the_pull_dropped(tmp_path, allocations, invoices):
+    """The other half of the same failure: rows that never came back at all."""
+    thin = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "10.0",
+            "year": 2025,
+            "month": 1,
+        }
+    ]
+    snap = reconciling(tmp_path, "thin", allocations, thin, [invoice(2025, 1, 100.0)])
+
+    row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
+    assert row["status"] == "usage low"
+    assert row["pct_difference"] == pytest.approx(-90.0)
+
+
+def test_reconcile_tolerates_the_rounding_between_the_two_sides(tmp_path, allocations):
+    """Two decimal places per user-month against the invoice's ten: not a finding."""
+    rows = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "16694.73",
+            "year": 2026,
+            "month": 4,
+        }
+    ]
+    snap = reconciling(tmp_path, "rounded", allocations, rows, [invoice(2026, 4, 16695.077778)])
+    assert reports.reconcile(snap, customer="UKRI").row(0, named=True)["status"] == "ok"
+
+    tight = reports.reconcile(snap, customer="UKRI", tolerance=0.0)
+    assert tight.row(0, named=True)["status"] == "ok"  # still inside the floor
+
+
+def test_reconcile_marks_a_month_with_no_usage_behind_the_invoice(tmp_path, allocations):
+    snap = reconciling(tmp_path, "unused", allocations, [], [invoice(2026, 4, 500.0)])
+    row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
+    assert row["status"] == "no usage"
+    assert row["node_hours"] is None
+    assert row["difference"] is None
+
+
+def test_reconcile_says_nothing_about_a_month_with_no_invoice(tmp_path, allocations):
+    rows = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "500.0",
+            "year": 2026,
+            "month": 4,
+        }
+    ]
+    snap = reconciling(tmp_path, "uninvoiced", allocations, rows, [])
+    row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
+    assert row["status"] == "no invoice"
+    assert row["incurred_costs"] is None
+
+
+def test_reconcile_calls_an_empty_month_ok(tmp_path, allocations):
+    """Nothing used and nothing billed is agreement, not a gap."""
+    snap = reconciling(tmp_path, "quiet", allocations, [], [invoice(2025, 3, 0.0)])
+    assert reports.reconcile(snap, customer="UKRI").row(0, named=True)["status"] == "ok"
+
+
+def test_reconcile_all_widens_both_sides_and_stops_corresponding(snapshot):
+    """`--all` drops the customer filter from the usage *and* the invoice side.
+
+    Which is why it cannot be read as a check. Here it pulls in an invoice
+    belonging to another organisation; against the portal it pulls in UKRI and
+    other organisations' usage whose invoices go somewhere this token cannot see. Either way
+    the two sides are no longer measuring the same estate.
+    """
+    frame = reports.reconcile(snapshot, scope=False)
+    february = frame.filter(pl.col("month") == date(2026, 2, 1)).row(0, named=True)
+    assert february["incurred_costs"] == pytest.approx(102.5)  # both invoices now
+    assert february["node_hours"] == pytest.approx(3.5)
+
+
+def test_reconcile_is_empty_without_either_side(tmp_path, allocations):
+    snap = reconciling(tmp_path, "nothing", allocations, [], [])
+    frame = reports.reconcile(snap, customer="UKRI")
+    assert frame.is_empty()
+    assert "status" in frame.columns
 
 
 def test_as_of_reads_the_snapshot_date(tmp_path):

@@ -28,6 +28,9 @@ quoting a figure:
    returns some rows twice and drops others. Nothing about the *numbers* is
    changed; the pull is. See
    [One endpoint cannot be paged straight through](#one-endpoint-cannot-be-paged-straight-through).
+5. **`reconcile` compares two endpoints that should agree**, and is the only
+   report whose output is a verdict rather than a table of the portal's own
+   figures. Run it before quoting anything derived from the usage endpoint.
 
 Everything else is the portal's own view, rearranged into a table.
 
@@ -70,6 +73,7 @@ a token issued to, say, an Exeter administrator sees:
 | `users` | small | yours only |
 | `openportal-associations` | large | **the whole machine** |
 | `openportal-allocation-user-usage` | large | **the whole machine** |
+| `invoices` | small | yours only — one per month, one customer |
 
 So some endpoints are filtered for you and some are not, with no flag saying
 which. Worse, the unfiltered ones are *partly* redacted: a substantial
@@ -244,12 +248,102 @@ borrow capacity nobody else claimed — so a month over 100% is possible. It is
 also what a duplicated pull looks like, and that is what the months over 100%
 in the snapshots taken before the paging fix actually were: see
 [One endpoint cannot be paged straight through](#one-endpoint-cannot-be-paged-straight-through).
-Before quoting a figure above 100%, cross-check it against the
-organisation dashboard's *Cost* card in the portal, whose `incurred_costs` is
-the same node hours by another route.
+Before quoting a figure above 100%, run `report reconcile`, which does
+that cross-check for you against the invoice the portal's own organisation
+dashboard bills off.
 
 This is the opposite of `utilisation.month_vs_limit_pct`, which *cannot* exceed
 100% because its denominator is a node limit that tracks the remaining balance.
+
+### `reconcile` — from `openportal-allocation-user-usage` + `invoices`
+
+The one report that checks the data rather than presenting it. Every other
+report here trusts the pull; this one asks whether the pull adds up.
+
+**Why it can.** `invoices.incurred_costs` is a running total in credits, and on
+this deployment a credit *is* a node hour: every usage line on every invoice
+in a snapshot carries `unit_price` exactly `1.0000000000` and
+`measured_unit` `hours`, and `incurred_costs` equals the sum of those lines'
+`quantity` to the last decimal place on every one of them. Billing rolls the
+same node hours up through the marketplace resources, not through
+`openportal-allocation-user-usage`, so the two figures are independent
+measurements — which is the whole value of the comparison. The only other
+overlap in this API is `openportal-allocations.node_usage` against
+`accounting-summary.current_month_spend`, and those agree to the penny for the
+month in progress and say nothing about any earlier one. `invoices` is the only
+second opinion with a time axis.
+
+**Use `incurred_costs`, never `price` or `total`.** Those are net of the credit
+lines the portal writes to zero a grant-funded invoice out, and unevenly so —
+an invoice can bill several thousand node hours and show a `total` anywhere
+from a few hundred down to a fraction of a penny, depending on how much of it
+a credit line cancels.
+
+| Column | Derivation |
+| --- | --- |
+| `node_hours` | `sum(node_usage)` for the customer's projects that month — the same figure `monthly-totals` prints, from `reports._monthly_rows` |
+| `incurred_costs` | `sum(incurred_costs)` over that month's invoices for the same customer, matched on the name inside `customer_details` |
+| `difference` | `node_hours - incurred_costs`, **null** when a month is missing from one side entirely |
+| `pct_difference` | `100 * difference / incurred_costs`, null on a zero invoice |
+| `status` | see below; the comparison reads a missing side as zero, so a month nobody used and nobody billed is `ok` rather than a flag |
+| `invoice_state` | the invoice's own `state` (`created`, `pending`), distinct values comma-joined |
+| `is_partial` | the month the snapshot was taken in, as in `monthly-totals` |
+
+`status` is `ok` when the two sides are within `reports.RECONCILE_TOLERANCE`
+(1%) of each other or within `reports.RECONCILE_FLOOR` (2.0 node hours),
+whichever allowance is larger; `usage high` or `usage low` when they are not;
+`no invoice` for usage in a month the portal has not invoiced, and `no usage`
+for an invoice with no usage rows behind it.
+
+Both thresholds are set to catch a broken pull rather than to audit rounding.
+The two sides are rolled up differently — the usage endpoint rounds each
+user-month to two decimals, the invoice keeps ten — and on a correctly pulled
+snapshot every complete month still agrees to a small fraction of a percent:
+well under a node hour of drift on totals in the tens of thousands. The
+absolute floor exists because an invoice can carry a project whose allocation
+this token cannot see (a project can appear on an invoice with no visible
+allocation behind it, for a small handful of node hours in some months), and
+that lands as a fixed gap rather than a proportional one.
+
+**What it would have caught.** Against a pre-fix snapshot — one of the
+end-to-end pulls that put one month well over 100% of our share — most months
+read `usage low` or `usage high` rather than `ok`: a month can be undercounted
+by more than half, or overcounted by several times over, depending on which
+pages the database happened to skip or repeat that request.
+
+Only the months at the tail of the walk tend to agree, which is the signature
+of unstable `LIMIT`/`OFFSET` paging: rows repeat and vanish across page
+boundaries everywhere except at the tail. The damage runs in *both*
+directions — a `usage low` month is one whose rows went to some other page and
+never came back — and it does not cancel out in aggregate: a snapshot's worth
+of months, summed, can read well above what the invoices total.
+
+Re-running an end-to-end pull does not reproduce the same wrong numbers
+either, and that is the second thing reconcile shows you: every end-to-end
+pull shuffles differently, so a month that was overcounted one way in one pull
+is overcounted a different way in the next. A number that moves between pulls
+of the same finished month cannot be checked by looking at it — only against
+something outside itself.
+
+**De-duplicating would not have repaired it, which is why `cache.check()`
+refuses to.** Dropping the repeated keys from a bad pull and running this
+report again narrows most months but still leaves several under-billed. The
+duplicates were the symptom; the rows that never arrived are the damage, and
+no amount of tidying brings them back.
+
+**Scope.** `reconcile` compares one organisation at a time, because an invoice
+belongs to one. `--all` (`scope=False`, `customer=None`) drops that filter from
+both sides at once and they stop corresponding: usage arrives for other
+organisations' projects whose invoices go to their own organisations and are
+not in this snapshot, so widening the scope reads `usage high` by however much
+of that other, correctly billed work fell in scope. Under `--all` the report
+is a description, not a check.
+
+**What it cannot see.** A month where both sides are wrong the same way, and
+anything that is not node hours. It also cannot attribute a mismatch to a
+project on its own: invoice items *do* carry `project_uuid` and reconcile
+per project to the same tolerance, so the drill-down is a join away, but the
+month-level check is what catches a bad pull and the report stops there.
 
 ### `user-usage` — from `openportal-allocation-user-usage`
 
@@ -429,6 +523,13 @@ Three guards, because every failure here is silent:
   snapshot taken before this fix fails loudly instead of quietly reporting a
   wildly inflated month.
 
+And one check that does not depend on knowing how the pull works at all:
+[`report reconcile`](#reconcile--from-openportal-allocation-user-usage--invoices)
+puts the summed node hours beside `invoices.incurred_costs` for the same month.
+The three guards above know the shape of *this* failure; reconcile only knows
+what the total ought to be, so it is the one that would still fire on the next
+way this endpoint finds to be wrong. Run it after every snapshot.
+
 `check()` raises rather than de-duplicating, deliberately. A repeated row means
 the pull enumerated the table unreliably, and for every row returned twice
 another was returned not at all; keeping one of each would leave a snapshot
@@ -461,8 +562,15 @@ a year renders as `2,025.00`.
 `pytest`, with `respx` mocking `httpx` at the transport layer — no network. The
 fixtures in `tests/conftest.py` deliberately reproduce the awkward parts of the
 real data: a project with two service allocations, an association pointing at an
-allocation the token cannot see, another organisation's user, and a row the
-portal blanked entirely. If a change survives those, it survives the portal.
+allocation the token cannot see, another organisation's user, a row the portal
+blanked entirely, and an invoice whose `total` is zeroed by a credit line while
+`incurred_costs` still bills 15,000 node hours. If a change survives those, it
+survives the portal.
+
+The `reconcile` tests are regression tests for the paging bug written the way
+the report sees it: a month summed twice against its invoice, a month whose rows
+went missing, and — the case a row-key guard cannot catch — usage doubled across
+two *legitimately distinct* allocation rows of the same project.
 
 `tests/test_viz.py` renders the whole page once (module-level cache — it is 5 MB)
 and asserts the properties that are easy to lose in a refactor and invisible in

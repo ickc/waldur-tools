@@ -197,6 +197,65 @@ def user_usage_rows():
     ]
 
 
+def invoice(year, month, hours, customer="UKRI", state="created"):
+    """One month's invoice, carrying the two traps the real ones do.
+
+    ``incurred_costs`` is the node hours -- the portal bills one credit per node
+    hour, ``unit_price`` exactly ``1.0000000000`` on every usage line -- and
+    ``price``/``total`` are that same usage net of the credit line the portal
+    writes to zero a grant-funded invoice out. So the totals are 0.00 while the
+    month really billed ``hours``, which is why ``reports.invoiced`` reads
+    ``incurred_costs`` and nothing else.
+    """
+    return {
+        "number": 100000 + year * 100 + month,
+        "year": year,
+        "month": month,
+        "state": state,
+        "price": "0.0000000000",
+        "tax": "0.0000000000",
+        "total": "0.0000000000",
+        "incurred_costs": f"{hours:.10f}",
+        "customer_details": {"name": customer, "email": "billing@example.test"},
+        "items": [
+            {
+                "name": "Isambard 3 / NODE",
+                "billing_type": "usage",
+                "measured_unit": "hours",
+                "quantity": f"{hours:.10f}",
+                "unit_price": "1.0000000000",
+                "total": f"{hours:.2f}",
+                "project_name": "Project A",
+                "project_uuid": "pa",
+            },
+            {
+                "name": "Credit",
+                "billing_type": "fixed",
+                "measured_unit": "",
+                "quantity": "1",
+                "unit_price": f"-{hours:.2f}",
+                "total": f"-{hours:.2f}",
+            },
+        ],
+    }
+
+
+@pytest.fixture
+def invoices():
+    """Invoices matching ``user_usage_rows``, plus one that is not ours.
+
+    1.5 node hours in January 2025 and 3.5 in February 2026 are exactly what the
+    usage rows sum to for the two projects this token administers. Carol's 99.0
+    is not in them: her organisation is invoiced separately, and its invoice is
+    here to be filtered out rather than netted off.
+    """
+    return [
+        invoice(2025, 1, 1.5),
+        invoice(2026, 2, 3.5, state="pending"),
+        invoice(2026, 2, 99.0, customer="Other Uni"),
+    ]
+
+
 @pytest.fixture
 def usage_reports():
     return [

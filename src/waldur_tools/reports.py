@@ -40,6 +40,22 @@ DEFAULT_SHARE = 0.10
 #: token, which would inflate our own share if counted in.
 DEFAULT_CUSTOMER = "University of Exeter"
 
+#: How far :func:`reconcile` lets the summed usage drift from the invoice before
+#: it calls a month a mismatch, as a fraction of the invoice. The two sides are
+#: independent roll-ups of the same node hours -- the usage endpoint rounds each
+#: user-month to two decimals, the invoice keeps ten -- so on a month that is
+#: genuinely fine they agree to a tiny fraction of a percent, orders of
+#: magnitude inside this. It is set to catch a broken pull, not to audit
+#: rounding.
+RECONCILE_TOLERANCE = 0.01
+
+#: The absolute floor under that tolerance, in node hours, so a month billed at
+#: a handful of node hours is not called a mismatch over a fraction of one. An
+#: invoice can also carry a project whose allocation this token cannot see,
+#: contributing a node hour or two of its own, and that lands as an absolute
+#: gap rather than a proportional one.
+RECONCILE_FLOOR = 2.0
+
 
 def project_code(column: str) -> pl.Expr:
     """Extract the SLURM project code from a Waldur ``groupname``/``username``.
@@ -452,6 +468,177 @@ def monthly_totals(
     )
 
 
+def invoiced(
+    source: Snapshot | WaldurClient, *, customer: str | None = DEFAULT_CUSTOMER
+) -> pl.DataFrame:
+    """The node hours the portal billed, one row per calendar month.
+
+    ``invoices.incurred_costs`` is a running total in credits, and on this
+    deployment a credit *is* a node hour: every usage line on every invoice in
+    a snapshot carries ``unit_price`` exactly ``1.0000000000`` and
+    ``measured_unit`` ``hours``, and ``incurred_costs`` equals the sum of those
+    lines' ``quantity`` to the last decimal place on every one of them. So the
+    field is a second, independent measurement of the same node hours
+    :func:`monthly_totals` sums out of the usage endpoint -- which is what makes
+    :func:`reconcile` possible at all.
+
+    Use ``incurred_costs`` and not ``price`` or ``total``. Those are net of the
+    credit lines the portal writes to zero a grant-funded invoice out, and they
+    do it unevenly -- an invoice can bill thousands of node hours and still
+    show a ``total`` near zero once the credit line cancels it.
+
+    ``customer`` filters on the name inside ``customer_details``, so the usage
+    side and the invoice side are asked about the same organisation. ``None``
+    keeps every invoice the token can see.
+    """
+    frame = load(source, ["invoices"])["invoices"]
+    empty = pl.DataFrame(
+        schema={"month": pl.Date, "incurred_costs": pl.Float64, "invoice_state": pl.String}
+    )
+    if frame.is_empty():
+        return empty
+
+    frame = integral(numeric(frame, "incurred_costs"), "year", "month")
+    if customer is not None and "customer_details" in frame.columns:
+        frame = frame.filter(pl.col("customer_details").str.json_path_match("$.name") == customer)
+    if frame.is_empty():
+        return empty
+
+    return (
+        frame.with_columns(month=pl.date(pl.col("year"), pl.col("month"), 1))
+        .drop_nulls("month")
+        .group_by("month")
+        .agg(
+            incurred_costs=pl.col("incurred_costs").sum(),
+            invoice_state=pl.col("state").unique().sort().str.join(", "),
+        )
+        .sort("month")
+    )
+
+
+def reconcile(
+    source: Snapshot | WaldurClient,
+    *,
+    customer: str | None = DEFAULT_CUSTOMER,
+    scope: bool = True,
+    tolerance: float = RECONCILE_TOLERANCE,
+) -> pl.DataFrame:
+    """Summed usage against the invoice, month by month: does the pull add up?
+
+    Two routes to one number. ``node_hours`` is
+    ``openportal-allocation-user-usage`` summed over a user, an allocation and a
+    month, exactly as :func:`monthly_totals` does it; ``incurred_costs`` is what
+    the portal billed the organisation for that month, and equals node hours on
+    this deployment (see :func:`invoiced`). They come from different endpoints,
+    aggregated by different sides of the portal, so agreement is evidence and
+    disagreement is a defect -- in the pull, in the scope, or in the billing.
+
+    **This is the check that would have caught the paging bug**, before an
+    inflated headline could be read as a finding. Run against a
+    snapshot taken by paging that endpoint end to end, most months read
+    ``ok`` while a handful read ``usage high`` -- overcounted by a wide
+    margin, since a duplicated page counts the same usage twice.
+
+    Only the months at the tail of a table-wide walk tend to agree, which is
+    the signature of unstable ``LIMIT``/``OFFSET`` paging: rows repeat and
+    vanish across page boundaries everywhere except at the tail. A correctly
+    pulled snapshot instead agrees with the invoice to a small fraction of a
+    percent in every month.
+
+    ``difference`` is ``node_hours - incurred_costs``, so it is **positive when
+    we counted usage nobody billed** -- the shape a duplicated pull takes -- and
+    negative when the invoice knows about usage the pull does not. ``status``
+    reduces that to one word per month:
+
+    ``ok``
+        Within ``tolerance`` of the invoice, or within :data:`RECONCILE_FLOOR`
+        node hours of it, whichever is the larger allowance. A month with no
+        usage and a zero invoice is ``ok`` rather than empty.
+    ``usage high`` / ``usage low``
+        Outside it, in the direction named. Suspect the pull first.
+    ``no invoice``
+        Usage in a month the portal has not invoiced. Nothing to check against;
+        not a finding on its own.
+    ``no usage``
+        An invoice with no usage rows behind it at all.
+
+    ``is_partial`` marks the month the snapshot was taken in. It reconciles like
+    any other -- both sides stop at the same instant -- but neither figure is
+    the month's final one.
+
+    ``scope=False`` (or ``customer=None``) widens *both* sides to everything the
+    token can see, and the two do not correspond: usage arrives for other
+    organisations' projects, whose invoices go to their own organisations and
+    are not in this snapshot. Expect ``usage high`` for every month with a
+    mismatch that is real billing rather than a bad pull.
+    """
+    if not scope:
+        customer = None
+    usage = (
+        _monthly_rows(source, customer=customer, scope=scope)
+        .group_by("month")
+        .agg(node_hours=pl.col("node_usage").sum())
+    )
+    billed = invoiced(source, customer=customer)
+    if usage.is_empty() and billed.is_empty():
+        return pl.DataFrame(
+            schema={
+                "month": pl.Date,
+                "node_hours": pl.Float64,
+                "incurred_costs": pl.Float64,
+                "difference": pl.Float64,
+                "pct_difference": pl.Float64,
+                "status": pl.String,
+                "invoice_state": pl.String,
+                "is_partial": pl.Boolean,
+            }
+        )
+
+    today = as_of(source)
+    # A month absent from one side is not the same as a zero on it, so the join
+    # keeps the null and `status` decides what a missing side means. The
+    # comparison itself reads a missing side as zero, which is what makes a
+    # month nobody used and nobody billed reconcile instead of raising a flag.
+    gap = pl.col("node_hours").fill_null(0.0) - pl.col("incurred_costs").fill_null(0.0)
+    allowed = pl.max_horizontal(
+        pl.lit(RECONCILE_FLOOR), tolerance * pl.col("incurred_costs").fill_null(0.0).abs()
+    )
+    return (
+        usage.join(billed, on="month", how="full", coalesce=True)
+        .with_columns(
+            difference=pl.col("node_hours") - pl.col("incurred_costs"),
+            pct_difference=(
+                100
+                * (pl.col("node_hours") - pl.col("incurred_costs"))
+                / pl.col("incurred_costs").replace(0.0, None)
+            ),
+            status=(
+                pl.when(gap.abs() <= allowed)
+                .then(pl.lit("ok"))
+                .when(pl.col("incurred_costs").is_null())
+                .then(pl.lit("no invoice"))
+                .when(pl.col("node_hours").is_null())
+                .then(pl.lit("no usage"))
+                .when(gap > 0)
+                .then(pl.lit("usage high"))
+                .otherwise(pl.lit("usage low"))
+            ),
+            is_partial=pl.col("month") == date(today.year, today.month, 1),
+        )
+        .select(
+            "month",
+            "node_hours",
+            "incurred_costs",
+            "difference",
+            "pct_difference",
+            "status",
+            "invoice_state",
+            "is_partial",
+        )
+        .sort("month")
+    )
+
+
 def user_usage(
     source: Snapshot | WaldurClient,
     *,
@@ -550,9 +737,10 @@ REPORTS = {
     "utilisation": utilisation,
     "monthly": monthly,
     "monthly-totals": monthly_totals,
+    "reconcile": reconcile,
     "user-usage": user_usage,
     "queue": queue,
 }
 
 #: Reports whose signature accepts ``scope=``, so the CLI can offer ``--all``.
-SCOPED = {"membership", "user-usage", "monthly", "monthly-totals"}
+SCOPED = {"membership", "user-usage", "monthly", "monthly-totals", "reconcile"}
