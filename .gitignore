@@ -25,3 +25,7 @@ htmlcov/
 # local data snapshots
 data/
 *.parquet
+
+# Generated reports. `viz` inlines real project names, usage and credit
+# balances into the page, so a built report is data, not source.
+*.html

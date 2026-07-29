@@ -129,22 +129,93 @@ def projects():
 def accounting_summary():
     return [
         {
+            # `project_uuid` is what `reports.allocations` joins on, because
+            # project names are not unique in a real estate and only one of a
+            # duplicated pair holds the credits.
+            "project_uuid": "pa",
             "project_name": "Project A",
             "customer_name": "UKRI",
             "total_credits": "30000.00000",
             "total_spend": "10000.00",
             "current_month_spend": "2000.00",
+            "start_date": "2026-01-01",
             "end_date": "2026-08-01",
         },
         {
+            "project_uuid": "pb",
             "project_name": "Project B",
             "customer_name": "UKRI",
             "total_credits": "1000.00000",
             "total_spend": "0.00",
             "current_month_spend": "0.00",
-            "end_date": "2026-08-01",
+            "start_date": "2026-06-01",
+            # Open ended, as the internal projects are: measured to the
+            # snapshot date instead of an award end.
+            "end_date": None,
         },
     ]
+
+
+@pytest.fixture
+def customers():
+    """`customer_credit` and `customer_unallocated_credit` are the only
+    organisation-level quantities the portal carries, and the difference between
+    them is credit handed down to projects."""
+    return [
+        {
+            "uuid": "cust-ukri",
+            "name": "UKRI",
+            "projects_count": 2,
+            "customer_credit": "50000.00000",
+            "customer_unallocated_credit": "20000.00000",
+        },
+        {
+            # The legacy internal customer carries nulls, not zeroes.
+            "uuid": "cust-legacy",
+            "name": "Example Internal Projects",
+            "projects_count": 1,
+            "customer_credit": None,
+            "customer_unallocated_credit": None,
+        },
+    ]
+
+
+@pytest.fixture
+def sacct_output():
+    """``sacct --parsable2`` lines in :data:`waldur_tools.slurm.FIELDS` order.
+
+    Deliberately raw text rather than a ready-made frame: the reshaping is the
+    part with edge cases in it, and every one below is a case seen in the real
+    output -- a job cancelled before it started, one that inherited the
+    partition's time limit, and the tiny single-node jobs that dominate the
+    count on a machine like this.
+    """
+    return "\n".join(
+        [
+            # Two months, so the per-month figures have more than one column.
+            "101|alice.abc1|brics.abc1|grace|COMPLETED|2026-03-01T09:00:00|"
+            "2026-03-01T09:00:06|60|6|1|1|1",
+            "102|alice.abc1|brics.abc1|grace|COMPLETED|2026-03-01T10:00:00|"
+            "2026-03-01T11:00:00|1440|36000|4|288|4",
+            "103|bob.abc2|brics.abc2|grace|FAILED|2026-03-02T08:00:00|"
+            "2026-03-04T08:00:00|2880|7200|16|1152|16",
+            # Never started: `wait_seconds` must be null, not zero.
+            "104|bob.abc2|brics.abc2|grace|CANCELLED by 1234|2026-03-02T09:00:00|"
+            "Unknown|1440|0|2|144|0",
+            # No requested limit of its own, so no requested node hours either.
+            "105|alice.abc1|brics.abc1|grace|COMPLETED|2026-04-01T09:00:00|"
+            "2026-04-01T09:00:30|Partition_Limit|30|1|1|1",
+            "106|alice.abc1|brics.abc1|grace|TIMEOUT|2026-04-05T09:00:00|"
+            "2026-04-05T21:00:00|720|43200|8|576|8",
+        ]
+    )
+
+
+@pytest.fixture
+def job_records(sacct_output):
+    from waldur_tools import slurm
+
+    return slurm.parse(sacct_output)
 
 
 @pytest.fixture

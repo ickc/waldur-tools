@@ -243,8 +243,9 @@ turns out to be node *days*, every percentage in the report is ~24× too small,
 while the shape of every curve is unchanged.
 
 **Above 100% is not an error, but check the pull first.** The share is an
-average entitlement rather than a quota, and SLURM fair-share lets a busy month
-borrow capacity nobody else claimed — so a month over 100% is possible. It is
+accounting entitlement, not a quota, and nothing on the machine enforces it —
+see [What actually limits us](#what-actually-limits-us) below — so a month over
+100% is possible. It is
 also what a duplicated pull looks like, and that is what the months over 100%
 in the snapshots taken before the paging fix actually were: see
 [One endpoint cannot be paged straight through](#one-endpoint-cannot-be-paged-straight-through).
@@ -255,6 +256,183 @@ dashboard bills off.
 This is the opposite of `utilisation.month_vs_limit_pct`, which *cannot* exceed
 100% because its denominator is a node limit that tracks the remaining balance.
 
+### What actually limits us
+
+An earlier version of this document and of the report said months over 100%
+were fair share letting us borrow idle capacity. That was wrong, and it was
+wrong in a way worth recording, because it is the obvious guess. Check it on a
+login node rather than assuming either way:
+
+```console
+$ scontrol show config | grep -iE 'Priority(Type|Weight|Decay|UsageReset)'
+$ sacctmgr show assoc account=brics.<code> format=Account,GrpTRESMins
+$ scontrol show config | grep -i AccountingStorageEnforce
+```
+
+On the deployment this package was written against, **every priority weight is
+zero** — `FairShare`, `Age`, `Assoc`, `JobSize`, `Partition`, `QOS` alike. The
+multifactor plugin is loaded and `sshare` prints a full fair-share tree, and
+none of it reaches a job's priority: every job scores the same, so the queue is
+first come, first served under `sched/backfill`. No account is penalised for
+running over its share or favoured for running under it. There is no borrowing,
+because there is nothing to borrow from.
+
+**What is enforced is per project, not per organisation.** Each project's SLURM
+account carries a `GrpTRESMins`, and an `AccountingStorageEnforce` including
+`limits` and `safe` makes SLURM refuse to start a job that would exceed it. That
+limit is the portal's `limits.node`, converted: `GrpTRESMins.cpu` is in
+cpu-minutes, so dividing by `cores_per_node × 60` gives node hours, and the
+result matches `limits.node` on the marketplace resource — and
+`openportal-allocations.node_limit` is that figure truncated to an integer.
+`sinfo -o '%c'` gives the core count. So the chain is: credits granted in Waldur
+→ `limits.node` on the marketplace resource → `GrpTRESMins` on `brics.<code>` →
+a job that will not start.
+
+Two consequences for reading the report:
+
+- **The organisation's share is an accounting construct with no scheduler
+  behind it.** We exceed it in a month by having work to run when the machine is
+  idle, and we fall short of it by not having work — not by being throttled.
+  There is no organisation-level account to cap, either: the project accounts
+  hang directly off the root.
+- **A project's own limit is a burn-down of its whole award, not a monthly
+  ration.** SLURM's usage counter does reset monthly here
+  (`PriorityDecayHalfLife = 0` with `PriorityUsageResetPeriod = MONTHLY`), and
+  the portal re-pushes a decremented limit on each sync, which is how a lifetime
+  balance is implemented on top of a monthly-resetting counter. This is why
+  `viz` shows no cumulative shortfall figure: there is no running balance of the
+  organisation's share to be behind on.
+
+#### MACS is unmetered, and the limit is `i3` only
+
+Every project appears twice in `openportal-allocations`, once per service, and
+both rows carry the *same* `node_limit`. That is a mirror of one credit balance,
+not two pools — and only the `Isambard 3` side is enforced:
+
+```console
+$ sacctmgr show assoc cluster=i3,i3macs format=Cluster,Account,GrpTRESMins
+```
+
+**No account on `i3macs` carries a `GrpTRESMins` at all** — not one, on either
+cluster's account list. `i3macs` is a separate, much smaller cluster in
+slurmdbd (`sacctmgr show cluster` prints both with their TRES). Jobs do run
+there, and Waldur bills none of it: every invoiced node hour sits under the
+`Isambard 3` offering, while the `marketplace-component-usages` rows for the
+MACS offering all read `0.0`.
+
+So MACS is free at the point of use, and every figure in this package describes
+`i3` alone. `openportal-allocation-user-usage` cannot see MACS either: its
+`username` is `<user>.<code>.<cluster>` but the third field is `brics` on every
+row, so there is no cluster axis in it to filter on.
+
+### `allocations` — from `openportal-accounting-summary` + `openportal-allocations`
+
+The denominator behind the *% of own allocation* view on the project heatmap.
+Awards in this estate span more than two orders of magnitude, so measuring every
+project against the same organisational share tells you only which project is
+bigger; measuring each against its own award tells you which is being used.
+
+`mean_monthly_allocation = total_credits / award_months`, with `award_months`
+the calendar months from `start_date` to `end_date` inclusive. `end_date` is
+null for open-ended projects, which are measured to the snapshot date instead.
+
+The construction is ours, not the portal's — credits are granted as a lump for
+a period and no monthly figure exists anywhere in the API. Four limits, in
+descending order of how much they matter:
+
+| Limit | Effect |
+| --- | --- |
+| **Top-ups are back-dated.** `total_credits` is the award *as it stands now*, and credits get added to live projects. There is no grant-history endpoint — no `created` on the credit, no order log in the snapshot — so an extension granted late in the award is spread over the months before it as well. | The denominator exceeds what those months were actually funded at, so a topped-up project's early months read **quieter** than they were — a project that doubled its award half way through shows its early months at half their true share. The largest known error, and it only ever understates. |
+| **It is not a cap.** The enforced ceiling is the whole award, not a month of it, so a project may legitimately burn a year of credits in a fortnight. | Values well over 100% are normal, not errors. The view is deliberately unbounded. |
+| **`start_date` is portal setup, not first job.** The first job typically lands well after the project is created. | Slightly understates the rate of projects that started slowly. |
+| **Zero credits yields null, not zero.** Internal and workshop projects hold none. | They drop out of the relative view rather than reading as infinitely over budget. |
+
+The join is on `project_uuid` and **not** on `project_name`, because the name is
+not unique: an estate can carry two accounting rows sharing a name under
+different UUIDs, where only one is a real provisioned project — holding the
+credits, the allocations and the row in `projects` — and the other has zero
+credits and no allocation at all. A name join could pick either. Check with
+`report allocations` against your own snapshot before assuming names are unique.
+
+This is **not** the two-services duplication. A project's `Isambard 3` and
+`Isambard 3 Multi Architecture System` allocations share one `project_uuid`;
+that duplication is handled in `membership` and `in_scope` by keying on
+`project_code`.
+
+#### Sum the awarded rate per month, not across all projects
+
+`viz.committed` sums `mean_monthly_allocation` only over projects whose award
+window covers the month in question. Summing every project regardless of dates
+treats awards that never overlapped as concurrent, and inflates the total the
+moment one project's window closes. The two agree for as long as no award has
+expired yet, and that agreement is a coincidence rather than a licence to take
+the shortcut.
+
+#### What the awarded rate shows, and why the report draws it
+
+Three quantities, all in node hours a month, all printed by the tool rather than
+recorded here:
+
+| | Where it comes from |
+| --- | --- |
+| Our share | `nodes * share * 24 * days_in_month` |
+| Awarded to projects | `viz.committed`, summed over live awards |
+| Actually used | `report monthly-totals` |
+
+The order they come in is the finding, and on this estate it runs
+share > used > awarded. Usage sitting *above* the awarded rate means projects
+already run harder than their award periods pace them for — several are past
+their award outright, which the portal permits because `node_limit` never goes
+negative.
+
+An earlier draft of this file read the gap between awarded and share as "no
+amount of encouraging existing projects to run harder reaches it". That was
+wrong, and in an interesting direction. Utilisation is bounded by **how much
+credit reaches a project**, not by how hard the awarded projects work, and — see
+below — not by any shortage of credit either. The headline figure draws both
+lines so the two questions do not get confused.
+
+### The customer-level credit fields, which are easy to miss
+
+`customers` carries the only two organisation-level quantities in the whole API,
+and they are worth more than most of the per-project data:
+
+| Field | Meaning |
+| --- | --- |
+| `customer_credit` | credit the organisation holds |
+| `customer_unallocated_credit` | the part of it assigned to no project |
+| the difference | credit handed down to projects |
+
+**The difference reconciles exactly**, which is what makes the two fields
+trustworthy enough to quote. Sum the `limits.node` of the live (`OK`-state)
+`Isambard 3` marketplace resources, add the credits of any project holding a
+balance with no provisioned resource, and you land on
+`customer_credit - customer_unallocated_credit` to the penny.
+`viz.credit_position` is the accessor; verify it against your own snapshot
+rather than taking this on trust.
+
+Since a project's limit *is* its remaining balance, the allocated side is net of
+spend — which makes `customer_credit` a remaining figure too, not a lifetime
+grant.
+
+The consequence is the one number most likely to be missed: an organisation can
+hold a large unallocated balance while its utilisation looks poor, because
+unallocated credit reaches no project, and a project is the only thing that can
+spend it. An earlier draft of the report argued the headline percentage could
+not pass 100% because the credit was not there to pay for it. Whether that is
+true is a question about `customer_unallocated_credit`, and on this estate the
+answer was no.
+
+That makes the chain of constraints, in order of how much each actually binds:
+
+1. **Credit not allocated to projects** — `customer_unallocated_credit`, shown
+   as its own tile and expressed in months of the share.
+2. **Credit allocated but paced over long award periods** — the awarded rate
+   (`viz.committed`).
+3. **Projects having work to run** — where usage exceeds the awarded rate, this
+   binds least of the three.
+4. **The scheduler** — does not bind at all; see
+   [What actually limits us](#what-actually-limits-us).
 ### `reconcile` — from `openportal-allocation-user-usage` + `invoices`
 
 The one report that checks the data rather than presenting it. Every other
@@ -402,7 +580,17 @@ misleads. A change that undoes one of them should be deliberate.
   correlation out of where the axes happen to line up. Where a figure could show
   more than one measure, it carries *buttons* that rewrite the single axis
   (`viz._buttons`). This is also how absolute and relative views coexist:
-  node hours, % of share, average nodes, % of the month.
+  node hours, % of share, % of the month, % of own allocation.
+- **A control changes one aspect of one figure; it never stands in for a second
+  figure.** Buttons swap the measure or the binning of the same graph and the
+  slider on the job-size figure moves the month. Two unrelated series do not get
+  bundled behind a toggle just because both happen to be monthly — that is a
+  table of contents pretending to be a chart. This is why the demand section is
+  three figures rather than one with five buttons.
+- **Both bars are in the same unit or they do not share a figure.** The
+  job-size figure plots share-of-jobs against share-of-node-hours, both as
+  percentages of their own total, precisely so a count and a sum can be read
+  side by side without a second axis.
 - **Colour is assigned by entity, in fixed slot order.** `viz.SERIES` is a
   seven-slot palette validated for colour-vision deficiency — worst adjacent
   pair ΔE 9.1 light / 8.4 dark against a floor of 8, checked with a validator
@@ -418,10 +606,20 @@ misleads. A change that undoes one of them should be deliberate.
 - **Every figure has a table view.** Three of the light-mode series colours sit
   below 3:1 contrast against the surface; the documented relief for that is a
   readable table, so it is not optional decoration.
-- **The heatmap is log-scaled.** A month of production is three orders of
-  magnitude above a test job, and on a linear ramp everything but the peak
-  renders as empty. Colour is `log10(1 + node_hours)`; the colourbar is
-  relabelled `0, 10, 100, 1k, 10k` and the hover shows the real figure.
+- **The heatmap is log-scaled, and so is the per-project totals bar.** A month
+  of production is three orders of magnitude above a test job, and on a linear
+  ramp everything but the peak renders as empty. Heatmap colour is
+  `log10(1 + node_hours)`, relabelled `0, 10, 100, 1k, 10k`; the totals bar uses
+  a log *axis*, relabelled the same way. A log axis cannot place a zero, so
+  projects that never ran are pinned at `viz.FLOOR_NODE_HOURS` and labelled `0`
+  — dropping them would remove the whole point of that figure, and the hover
+  reads the true value back out of `customdata`.
+- **Queue waits are plotted as `log10(hours)`, not on a log axis.** Plotly fits
+  a violin's kernel density in the axis's own coordinates, so a linear fit
+  collapses the four decades of sub-second starts into a line. The transform is
+  applied to the data and the ticks are written back in hours and days.
+  A large share of jobs start within a second, so zero is floored at
+  `viz.FLOOR_WAIT_HOURS` (one minute) to keep that spike drawable.
 - **Sequential where the question is magnitude, categorical where it is
   identity.** The heatmap and the per-project totals bar are one hue; only the
   stacked figure and the engagement lines tell series apart.
@@ -435,6 +633,48 @@ Two things the monthly reports do not carry:
 | `projects_existing` | `projects.created` | The denominator behind "how many of the projects that existed ran something". Without it the active-project line reads as a plateau instead of a fraction. Returns empty rather than raising if `projects` is missing from an older snapshot, so the other six figures still render. |
 | `people_with_access` | `reports.membership` | The denominator behind "how many of the people with access ran something". Access granted and never exercised is invisible in the usage endpoint, which only knows about people who ran. |
 | `queue_monthly` | `reports.queue` | Rolls the daily queue report up to months. `mean_wait_hours` is total wait over total jobs, **not** the mean of daily means — a day with three jobs should not weigh as much as a day with three thousand. |
+| `reports.allocations` | `openportal-accounting-summary` | The denominator behind *% of own allocation*. See [`allocations`](#allocations--from-openportal-accounting-summary--openportal-allocations). |
+
+### The one source that is not the portal
+
+`waldur_tools.slurm` shells out to `sacct`. Everything else in this package
+reads the API; this does not, and the separation is deliberate.
+
+**Why it has to exist.** The portal's finest-grained view of job activity is
+`openportal-project-usage-reports`, whose blob nests a dictionary per *day*
+carrying `num_jobs`, `total_wait_seconds` and consumed resource-seconds per
+user. There is no record of an individual job anywhere in the API, and in
+particular no record of what a job **asked for** — the `--nodes` and `--time`
+in the batch script. Those are the two numbers the scheduler actually acts on,
+so without them "why did this wait?" is unanswerable. `sacct` has them as
+`ReqNodes` and `TimelimitRaw`.
+
+**How it is kept from infecting the rest.** A separate command
+(`waldur-tools slurm-jobs`) writes a separate file (`slurm-jobs.parquet` in the
+cache root, `slurm.JOBS_FILENAME`), which `viz` picks up if present and ignores
+if not. It is **not** written into a snapshot directory: a snapshot is an
+immutable record of what the portal said at one instant, and this is a
+re-derivable local capture of something the portal never said. Re-running
+overwrites it, which is safe because `sacct` keeps the history and a later
+capture is a superset.
+
+Three details in `slurm.parse` that are decisions rather than plumbing:
+
+- **`TimelimitRaw` and `ElapsedRaw`, not `Timelimit` and `Elapsed`.** The
+  formatted variants are `DD-HH:MM:SS` with the day part present only when
+  non-zero; the raw ones are plain minutes and plain seconds, so no parser can
+  get the ambiguous cases wrong.
+- **A job that never started has a null wait, not a zero one.** It did not wait
+  no time at all; it has no wait to report. Same for `Partition_Limit` in
+  `TimelimitRaw` — that is the absence of a request, and substituting the
+  partition limit would invent one the user did not make.
+- **`State` is truncated at the first space.** The twenty-odd distinct
+  `CANCELLED by <uid>` values are one outcome; the uid is who pressed the
+  button, which is not a property of the job.
+
+`sacct -a` returns every account's jobs on this deployment, which is what makes
+an organisation-wide report possible from an ordinary user account. If a site
+disabled that, `capture` would silently return only the caller's own jobs.
 
 ## The cache
 

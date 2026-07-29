@@ -148,6 +148,135 @@ def credits(source: Snapshot | WaldurClient) -> pl.DataFrame:
     )
 
 
+def allocations(
+    source: Snapshot | WaldurClient,
+    *,
+    customer: str | None = DEFAULT_CUSTOMER,
+    scope: bool = True,
+) -> pl.DataFrame:
+    """What each project was awarded, over what span, and its monthly average.
+
+    The denominator behind the *relative* view in ``viz``: a project's usage in
+    a month means nothing next to the whole organisation's share, because no
+    project was ever given the whole organisation's share. It means something
+    next to its own award.
+
+    ``mean_monthly_allocation`` is ``total_credits / award_months``, where
+    ``award_months`` counts calendar months from ``start_date`` to ``end_date``
+    inclusive. A project holding 12,000 node hours over a year is being asked
+    for 1,000 a month, and a month at 1,500 is a month it ran at 150% of its
+    own steady rate. Nothing in the portal states a monthly figure -- credits
+    are granted as a lump for a period -- so the lump spread evenly across the
+    period is the construction, and it is the one the ``viz`` report names.
+
+    **Four things it is not, which matter before quoting it.**
+
+    * **It is not a monthly cap.** The real ceiling is a single SLURM
+      ``GrpTRESMins`` on the ``brics.<code>`` account, which Waldur sets to the
+      *remaining* credits and which is enforced against the whole award, not
+      against a month of it. A project may legitimately burn a year's credits
+      in a fortnight; that reads as 1,200% here and is not an error. See
+      :func:`utilisation` for the limit as the portal reports it.
+    * **It back-dates top-ups.** ``total_credits`` is the award as it stands
+      *now*, and credits get added to a live project. There is no grant-history
+      endpoint -- no ``created`` on the credit, no order log in the snapshot --
+      so an extension granted in month ten is spread across months one to ten
+      as well. The denominator is therefore larger than the rate those early
+      months were actually funded at, and the percentage correspondingly
+      **smaller**: a topped-up project's first months read as quieter than they
+      were. A project that doubled its award half way through will show its
+      early months at half their true share. This is the largest known error in
+      the figure, and it runs one way -- it never overstates.
+    * **It ignores when the project actually started running.** ``start_date``
+      is when the project was set up in the portal, which precedes the first
+      job by weeks in most cases here.
+    * **It is undefined, not zero, when there are no credits.** The internal
+      and workshop projects hold none, so their ratio is null and they drop out
+      of the relative view rather than reading as infinitely over budget.
+
+    ``end_date`` is null for the open-ended internal projects; those are
+    measured to the snapshot date instead, so the span is "so far" rather than
+    unbounded.
+    """
+    projects = in_scope(source)
+    if not scope:
+        customer = None
+    if customer is not None:
+        projects = projects.filter(pl.col("customer_name") == customer)
+    if projects.is_empty():
+        return pl.DataFrame(
+            schema={
+                "project_code": pl.String,
+                "project_name": pl.String,
+                "customer_name": pl.String,
+                "start_date": pl.Date,
+                "end_date": pl.Date,
+                "total_credits": pl.Float64,
+                "award_months": pl.Int64,
+                "mean_monthly_allocation": pl.Float64,
+            }
+        )
+
+    summary = load(source, ["openportal-accounting-summary"])["openportal-accounting-summary"]
+    if summary.is_empty() or "project_uuid" not in summary.columns:
+        return projects.drop("project_uuid").with_columns(
+            start_date=pl.lit(None, pl.Date),
+            end_date=pl.lit(None, pl.Date),
+            total_credits=pl.lit(None, pl.Float64),
+            award_months=pl.lit(None, pl.Int64),
+            mean_monthly_allocation=pl.lit(None, pl.Float64),
+        )
+
+    # The join is on `project_uuid` and not on the name, because the name is
+    # not unique: an estate can carry two accounting rows sharing a name under
+    # different UUIDs, where only one is a real provisioned project -- holding
+    # the credits, the allocations and the row in `projects` -- and the other
+    # has zero credits and no allocation. A name join could pick either. (This
+    # is *not* the two-services duplication: a project's Isambard 3 and MACS
+    # allocations share one `project_uuid`.)
+    #
+    # The dates are filled in when absent rather than assumed present, so a
+    # snapshot taken before the portal carried them yields a null rate instead
+    # of raising -- the relative view is an extra, and losing it should not cost
+    # the caller the other columns.
+    def dated(column: str) -> pl.Expr:
+        if column not in summary.columns:
+            return pl.lit(None, pl.Date).alias(column)
+        return pl.col(column).cast(pl.String).str.to_date(strict=False).alias(column)
+
+    awarded = numeric(summary, "total_credits").select(
+        "project_uuid", dated("start_date"), dated("end_date"), total_credits="total_credits"
+    )
+    horizon = as_of(source)
+    finish = pl.col("end_date").fill_null(horizon)
+    months = (
+        (finish.dt.year() - pl.col("start_date").dt.year()) * 12
+        + (finish.dt.month() - pl.col("start_date").dt.month())
+        + 1
+    )
+    return (
+        projects.join(awarded, on="project_uuid", how="left")
+        .drop("project_uuid")
+        .with_columns(award_months=pl.max_horizontal(months, pl.lit(1)).cast(pl.Int64))
+        .with_columns(
+            mean_monthly_allocation=(
+                pl.col("total_credits").replace(0.0, None) / pl.col("award_months")
+            )
+        )
+        .select(
+            "project_code",
+            "project_name",
+            "customer_name",
+            "start_date",
+            "end_date",
+            "total_credits",
+            "award_months",
+            "mean_monthly_allocation",
+        )
+        .sort("mean_monthly_allocation", descending=True, nulls_last=True)
+    )
+
+
 def membership(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFrame:
     """Who has access to what: one row per user/project pairing.
 
@@ -247,8 +376,24 @@ def utilisation(source: Snapshot | WaldurClient) -> pl.DataFrame:
     it. Every allocation in normal operation reads ``OK``. ``is_active`` is the
     separate question of whether the allocation is switched on.
 
+    **Do not sum ``node_limit`` down this report.** Every project appears twice,
+    once per service, and the two rows carry the *same* ``node_limit`` -- it is
+    one credit balance rendered against both, not two pools. Summing the column
+    doubles the estate's apparent capacity.
+
+    **The MACS rows are not idle capacity, they are unmetered.** An
+    ``Isambard 3 Multi Architecture System`` row reads 0.00 used against a
+    healthy limit and looks like the emptiest allocation you have; it is not.
+    Nothing on that cluster is charged: no account on ``i3macs`` carries a
+    ``GrpTRESMins``, its ``marketplace-component-usages`` rows all read ``0.0``,
+    and every invoiced node hour sits under the ``Isambard 3`` offering -- while
+    real jobs do run there. So its
+    ``node_usage`` is not a measurement of anything, and the limit beside it is
+    the Isambard 3 balance showing through. Filter on
+    ``service_name == "Isambard 3"`` before reading this as utilisation.
+
     Sorted emptiest first: those are the allocations holding capacity nobody
-    used this month.
+    used this month -- subject to the paragraph above.
     """
     frame = load(source, ["openportal-allocations"])["openportal-allocations"]
     if frame.is_empty():
@@ -355,9 +500,28 @@ def _monthly_rows(
 def _entitlement(nodes: int, share: float) -> pl.Expr:
     """Node hours our share of the machine is worth in a given calendar month.
 
-    ``nodes * share`` nodes held for every hour of the month. It is an average
-    entitlement rather than a cap: SLURM fair-share lets a busy month borrow
-    capacity nobody else claimed, so a percentage above 100 is possible.
+    ``nodes * share`` nodes held for every hour of the month. It is an
+    accounting entitlement rather than a cap, and a percentage above 100 is
+    both possible and unremarkable.
+
+    **The share is not enforced anywhere on the machine.** Isambard 3 runs
+    ``PriorityType=priority/multifactor`` with every weight -- ``FairShare``,
+    ``Age``, ``JobSize``, ``QOS``, ``Partition`` -- set to zero, which leaves
+    every job at the same priority and the queue running first come, first
+    served under ``sched/backfill``. There is a fair-share tree in ``sshare``
+    and it decides nothing. The only enforced ceiling is per *project*: a
+    ``GrpTRESMins`` on the ``brics.<code>`` account, which the portal sets from
+    that project's remaining credits and which SLURM enforces via
+    ``AccountingStorageEnforce`` including ``limits`` and ``safe``. Its ``cpu``
+    figure is in cpu-minutes, so dividing by ``cores_per_node * 60`` gives node
+    hours and lands on the portal's own ``limits.node`` for that project. So
+    nothing holds these nodes for us, and nothing stops us using more of the
+    machine than our share when it is idle.
+
+    Confirm on a login node rather than trusting this paragraph::
+
+        scontrol show config | grep -iE 'Priority(Type|Weight)'
+        sacctmgr show assoc account=brics.<code> format=Account,GrpTRESMins
 
     It is also, historically, what a bad pull looked like. Paging
     ``openportal-allocation-user-usage`` end to end returned some rows twice and
@@ -733,6 +897,7 @@ def queue(source: Snapshot | WaldurClient) -> pl.DataFrame:
 #: Report name -> callable, for the CLI and for discovery.
 REPORTS = {
     "credits": credits,
+    "allocations": allocations,
     "membership": membership,
     "utilisation": utilisation,
     "monthly": monthly,
@@ -743,4 +908,4 @@ REPORTS = {
 }
 
 #: Reports whose signature accepts ``scope=``, so the CLI can offer ``--all``.
-SCOPED = {"membership", "user-usage", "monthly", "monthly-totals", "reconcile"}
+SCOPED = {"allocations", "membership", "user-usage", "monthly", "monthly-totals", "reconcile"}

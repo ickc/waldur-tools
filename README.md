@@ -55,6 +55,7 @@ pixi run waldur-tools report credits
 pixi run waldur-tools report reconcile        # does the usage match the invoices?
 pixi run waldur-tools report membership --limit 0            # every row
 pixi run waldur-tools report queue --sort num_jobs --desc -o queue.csv
+pixi run waldur-tools slurm-jobs              # per-job sacct records (on the cluster)
 pixi run waldur-tools viz -o utilisation.html            # the visual report
 ```
 
@@ -63,8 +64,9 @@ pixi run waldur-tools viz -o utilisation.html            # the visual report
 | Name | Question it answers |
 | --- | --- |
 | `credits` | How much of each project's allocation is spent, and how many months of runway remain at the current burn rate? |
+| `allocations` | What was each project awarded, over what span, and what does that average per month? |
 | `membership` | Which users have access to which project, with their real names and emails? (the `rse-sharing` example, as a join rather than a request per row) |
-| `utilisation` | Which allocations went unused *this month* against their node limit? |
+| `utilisation` | Which allocations went unused *this month* against their node limit? (one row per service — see the MACS note below) |
 | `monthly` | Node hours per project per month, against our share of the machine |
 | `monthly-totals` | The same, one row per month: are we using our 10%? |
 | `reconcile` | Do those node hours agree with what the portal actually billed us? |
@@ -72,9 +74,9 @@ pixi run waldur-tools viz -o utilisation.html            # the visual report
 | `queue` | Daily job counts and mean queue wait, per project and resource |
 
 Common options: `--limit N` (`0` for all rows), `--sort COL --sort COL2`
-with `--desc`, `-o FILE.csv|.json|.parquet`, and `--all` on `membership`,
-`user-usage`, `monthly`, `monthly-totals` and `reconcile` to lift the scope
-filter described below.
+with `--desc`, `-o FILE.csv|.json|.parquet`, and `--all` on `allocations`,
+`membership`, `user-usage`, `monthly`, `monthly-totals` and `reconcile` to lift
+the scope filter described below.
 
 **Run `reconcile` before you quote anything from `monthly`, `monthly-totals` or
 `viz`.** It puts the node hours those three sum out of
@@ -113,32 +115,75 @@ in a browser; there is a dark-mode toggle in the corner.
 It exists to answer one question. **Isambard 3 has 384 compute nodes and our GW4
 share is 10% of them — 38.4 nodes, held for every hour of every month.** Every
 percentage on the page is usage measured against that, which makes 100% "we ran,
-on average, exactly the nodes we hold" rather than a ceiling: fair-share lets a
-busy month borrow capacity nobody else claimed, so months over 100% are real and
-not an error.
+on average, exactly the nodes we hold" rather than a ceiling. The share is an
+accounting figure with no scheduler behind it: every SLURM priority weight on
+this machine is zero, so the queue is first come, first served and nothing
+reserves those nodes for us or stops us exceeding them. Months over 100% are
+real and not an error — see
+[What actually limits us](DEVELOPER.md#what-actually-limits-us).
 
-Seven figures, each with a table view underneath and, where two scales make
-sense, buttons that swap the y-axis rather than a second one:
+Each figure has a table view underneath and, where two scales make sense,
+buttons that swap the y-axis rather than adding a second one:
 
 | Figure | What you learn |
 | --- | --- |
-| Monthly usage vs share | The headline, in node hours, % of share, or average nodes |
-| Cumulative used vs entitled | The gap compounded — the number worth quoting at review |
+| Monthly usage vs share | The headline, in node hours or % of share |
 | Stacked usage by project | Where it came from, and how concentrated each month was |
-| Project × month heatmap | Which projects were set up and never used |
-| Total per project | Whether utilisation rests on two research groups |
+| Project × month heatmap | Which projects were set up and never used — in node hours, or against each project's own award |
+| Total per project | Whether utilisation rests on two research groups (log axis) |
 | Engagement | Projects set up vs projects running vs people running |
-| Jobs and queue wait | Whether low usage is a demand problem or a scheduling one |
+
+Plus three more if a SLURM capture is present (see below): the job-size
+distribution with a month slider, queue wait against what jobs *requested*, and
+the spread of waits per month as violins.
 
 Options: `--nodes` and `--share` if either figure changes, `--customer ''` to
 include the separately funded UKRI and other organisations' projects the portal also shows
-us, plus the usual `--use`, `--live` and `--root`.
+us, `--jobs FILE` to point at a capture explicitly, plus the usual `--use`,
+`--live` and `--root`.
 
-Two caveats the page states for itself, repeated here because they bound every
+Three caveats the page states for itself, repeated here because they bound every
 number in it. **The unit is assumed:** the portal calls the field `node_usage`
-and never says what it counts; this reads it as node hours. And **the month the
+and never says what it counts; this reads it as node hours. **The month the
 snapshot was taken in is partial**, so it is hatched in the first figure and
-excluded from every average.
+excluded from every average. And **mean monthly allocation is a construction**,
+not something the portal reports: credits are granted as a lump for a period,
+and this spreads them evenly across it.
+
+### Job shape, from SLURM
+
+```bash
+pixi run waldur-tools slurm-jobs     # on a cluster login node
+pixi run waldur-tools viz -o utilisation.html
+```
+
+The portal has no per-job view — its usage reports stop at daily totals — so
+what a job *asked for*, the `--nodes` and `--time` in the batch script, exists
+only in SLURM. `slurm-jobs` runs `sacct` and writes `slurm-jobs.parquet` into
+the cache root; `viz` picks it up automatically and gains three figures.
+
+This is the only command here that reads something other than the API, so it
+only works while logged in to the cluster. Everything else, `viz` included,
+builds from a snapshot alone — without the capture those three figures are
+simply left out.
+
+### Everything here describes `i3`, not `i3macs`
+
+Isambard runs two clusters under one slurmdbd, and every project holds an
+allocation on both. **The MACS side is unmetered**: no account on `i3macs`
+carries a SLURM limit, all its `marketplace-component-usages` rows read `0.0`,
+and every invoiced node hour sits under the `Isambard 3` offering — while real
+jobs do run there. So MACS use is free and invisible to this tool.
+
+Two consequences worth knowing:
+
+- **Do not sum `node_limit` down `report utilisation`.** Each project appears
+  once per service and both rows carry the *same* limit — one credit balance
+  shown twice, not two pools. A MACS row reading `0.00` used is not idle
+  capacity; it is a cluster nobody is charged for.
+- `slurm-jobs` pins `--cluster i3` rather than inheriting the login node's, so a
+  capture taken from a MACS node still describes the same machine as the rest of
+  the report. Pass `--cluster all` if you want both.
 
 ### The cache
 
@@ -223,10 +268,10 @@ Findings from working against a live deployment, which shaped the reports:
   name on allocations.
 - That same endpoint **cannot be paged end to end**. It is ordered by
   `(year, month)` and nothing else, so `LIMIT`/`OFFSET` returns some rows two or
-  three times and never returns others: thousands of duplicate keys in a tens of thousands of-row
-  pull, which inflated one month from the true figure node hours to well over the true figure. It is
-  fetched a month at a time instead, and both the pull and every read are
-  checked for repeated rows. Details in
+  three times and never returns others: thousands of duplicate keys in a pull
+  of tens of thousands of rows, which inflated one month's node hours well
+  past the true figure. It is fetched a month at a time instead, and both the
+  pull and every read are checked for repeated rows. Details in
   [DEVELOPER.md](DEVELOPER.md#one-endpoint-cannot-be-paged-straight-through).
 - `invoices.incurred_costs` is **the same node hours by another route**. Every
   usage line on every invoice bills `1.0000000000` credits per hour, and

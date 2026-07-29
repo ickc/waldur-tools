@@ -389,3 +389,53 @@ def test_as_of_reads_the_snapshot_date(tmp_path):
     snap = Snapshot.create(tmp_path, "dated")
     (snap.path / "meta.json").write_text('{"created": "2026-03-15T09:00:00+00:00"}')
     assert reports.as_of(snap) == date(2026, 3, 15)
+
+
+# --------------------------------------------------------------------------
+# allocations
+# --------------------------------------------------------------------------
+
+
+def test_allocations_spreads_the_award_over_its_months(snapshot):
+    """Nothing in the portal states a monthly figure, so this constructs one."""
+    frame = reports.allocations(snapshot, customer="UKRI")
+    a = frame.filter(pl.col("project_name") == "Project A").row(0, named=True)
+    # 2026-01-01 to 2026-08-01 is eight calendar months, inclusive of both.
+    assert a["award_months"] == 8
+    assert a["mean_monthly_allocation"] == pytest.approx(30000 / 8)
+
+
+def test_allocations_measures_an_open_ended_project_to_the_snapshot_date(snapshot):
+    """The internal projects have no end date; the span is "so far"."""
+    frame = reports.allocations(snapshot, customer="UKRI")
+    b = frame.filter(pl.col("project_name") == "Project B").row(0, named=True)
+    assert b["end_date"] is None
+    assert b["award_months"] >= 1
+    assert b["mean_monthly_allocation"] == pytest.approx(1000 / b["award_months"])
+
+
+def test_allocations_leaves_a_creditless_project_undefined(tmp_path, allocations, user_usage_rows):
+    """Null, not zero: a project with no award has no rate to be measured against.
+
+    Zero would make every one of its months read as infinitely over budget, and
+    the workshop and internal projects genuinely hold nothing.
+    """
+    from waldur_tools.cache import Snapshot
+    from waldur_tools.frames import to_frame
+
+    snap = Snapshot.create(tmp_path, "creditless")
+    snap.write("openportal-allocations", to_frame(allocations))
+    snap.write("openportal-allocation-user-usage", to_frame(user_usage_rows))
+    snap.write(
+        "openportal-accounting-summary",
+        to_frame([{"project_uuid": "pa", "total_credits": "0.00", "start_date": "2026-01-01"}]),
+    )
+    snap.write_meta({})
+    frame = reports.allocations(snap, customer="UKRI")
+    assert frame.filter(pl.col("project_name") == "Project A")["mean_monthly_allocation"][0] is None
+
+
+def test_allocations_is_empty_for_an_unknown_customer(snapshot):
+    frame = reports.allocations(snapshot, customer="No Such Organisation")
+    assert frame.is_empty()
+    assert "mean_monthly_allocation" in frame.columns

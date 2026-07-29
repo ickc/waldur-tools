@@ -3,11 +3,16 @@
 The question this exists to answer: Isambard 3 has 384 compute nodes, and the
 GW4 partner share held here is 10% of them. Are we using it?
 
-Everything is built from :func:`waldur_tools.reports.monthly_totals` and
+Most of it is built from :func:`waldur_tools.reports.monthly_totals` and
 :func:`waldur_tools.reports.monthly`, so the figures and the CSV you can export
 from ``report monthly`` are the same numbers. The output is one HTML file with
 plotly.js inlined -- no server, no CDN, no network at view time -- because the
 audience for this is a committee, not a terminal.
+
+**One source is not the portal.** The three job-shape figures read a
+``sacct`` capture (see :mod:`waldur_tools.slurm`), because the portal records
+daily job totals and nothing about an individual job. They are omitted when
+that capture is absent, and nothing else depends on it.
 
 **Design notes, so a later change does not undo them.** Series colours come from
 a palette validated for colour-vision deficiency (worst adjacent pair ΔE 9.1
@@ -79,7 +84,17 @@ CHROME: dict[str, tuple[str, str]] = {
 RAMP_LIGHT = ["#f0efec", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#0d366b"]
 RAMP_DARK = ["#242423", "#104281", "#184f95", "#256abf", "#3987e5", "#6da7ec", "#cde2fb"]
 
+#: Violin body fill, light then dark. Translucent rather than a solid step,
+#: so overlapping density lobes stay legible; it is kept out of :data:`SERIES`
+#: because the hex-for-hex swap the theme switch performs cannot carry alpha.
+VIOLIN_FILL = ("rgba(42,120,214,0.28)", "rgba(57,135,229,0.34)")
+
 FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+
+#: Where a zero is drawn on a logarithmic node-hour axis. A tenth of a node
+#: hour is below anything the portal records as real work, so the bar reads as
+#: "nothing" at a glance while still having a length to draw.
+FLOOR_NODE_HOURS = 0.1
 
 
 def light(role: str) -> str:
@@ -168,12 +183,25 @@ def _months(frame: pl.DataFrame) -> list[str]:
     return [value.strftime("%b %Y") for value in frame["month"].to_list()]
 
 
-def figure_share(totals: pl.DataFrame, nodes: int, share: float) -> go.Figure:
+def figure_share(
+    totals: pl.DataFrame, nodes: int, share: float, awarded: list[float] | None = None
+) -> go.Figure:
     """The headline: usage per month against what our share is worth.
 
     A column per month with a reference line at the entitlement, and buttons
-    that restate the same comparison in node hours, as a percentage, or as an
-    average node count -- the three units people ask for it in.
+    that restate the same comparison in node hours or as a percentage.
+
+    ``awarded`` adds a second reference line: the node hours a month actually
+    promised to projects (:func:`committed`). It is the more useful of the two
+    lines, because the entitlement is an accounting figure nobody has committed
+    to anyone, while this is the rate the credits behind the work were paced
+    at. Usage running above it -- which it usually does here -- is projects
+    spending their awards faster than the award period assumed, and that is
+    only sustainable until the credits run out.
+
+    There used to be a third button showing the same thing as an average node
+    count. It was dropped as redundant: node count and percentage are the same
+    number times a constant, so the two views drew identical shapes.
     """
     months = _months(totals)
     partial = totals["is_partial"].to_list()
@@ -185,7 +213,6 @@ def figure_share(totals: pl.DataFrame, nodes: int, share: float) -> go.Figure:
     usage = totals["node_hours"].to_list()
     entitlement = totals["entitlement_node_hours"].to_list()
     percent = totals["pct_of_entitlement"].to_list()
-    mean_nodes = totals["mean_nodes"].to_list()
 
     figure = go.Figure(
         [
@@ -210,7 +237,26 @@ def figure_share(totals: pl.DataFrame, nodes: int, share: float) -> go.Figure:
     )
 
     hundred = [100.0] * len(months)
-    held_line = [held] * len(months)
+    awarded = awarded or []
+    awarded_pct = [
+        100 * value / limit if limit else 0.0
+        for value, limit in zip(awarded, entitlement, strict=True)
+    ]
+    if any(awarded):
+        figure.add_trace(
+            go.Scatter(
+                x=months,
+                y=awarded,
+                name="Awarded to projects",
+                mode="lines",
+                line={"color": SERIES[1][0], "width": 2, "dash": "dot"},
+                hovertemplate="%{y:,.0f} node hours awarded<extra></extra>",
+                meta={"slot": 1},
+            )
+        )
+
+    absolute = [usage, entitlement] + ([awarded] if any(awarded) else [])
+    relative = [percent, hundred] + ([awarded_pct] if any(awarded) else [])
     figure.update_layout(
         _layout(
             title={
@@ -226,105 +272,24 @@ def figure_share(totals: pl.DataFrame, nodes: int, share: float) -> go.Figure:
                 "rangemode": "tozero",
             },
             updatemenus=_buttons(
-                ["Node hours", "% of share", "Nodes, monthly average"],
+                ["Node hours", "% of share"],
                 [
                     [
                         {
-                            "y": [usage, entitlement],
+                            "y": absolute,
                             "hovertemplate": "%{y:,.0f} node hours<extra></extra>",
                         },
                         {"yaxis.title.text": "Node hours"},
                     ],
                     [
                         {
-                            "y": [percent, hundred],
+                            "y": relative,
                             "hovertemplate": "%{y:,.1f}% of our share<extra></extra>",
                         },
                         {"yaxis.title.text": "% of our monthly share"},
                     ],
-                    [
-                        {
-                            "y": [mean_nodes, held_line],
-                            "hovertemplate": "%{y:,.1f} nodes<extra></extra>",
-                        },
-                        {"yaxis.title.text": "Nodes, averaged over the month"},
-                    ],
                 ],
             ),
-        )
-    )
-    return figure
-
-
-def figure_cumulative(totals: pl.DataFrame) -> go.Figure:
-    """Cumulative used against cumulative entitled: the gap, compounded.
-
-    Month-by-month percentages bounce around; this is the same data as a
-    running total, which is the form the "are we using our allocation?"
-    conversation actually happens in. The in-progress month is excluded --
-    a partial month would bend the actual line down against a full month of
-    entitlement and invent a shortfall.
-    """
-    complete = totals.filter(~pl.col("is_partial"))
-    running = complete.with_columns(
-        used=pl.col("node_hours").cum_sum(),
-        entitled=pl.col("entitlement_node_hours").cum_sum(),
-    )
-    months = _months(running)
-    used = running["used"].to_list()
-    entitled = running["entitled"].to_list()
-
-    figure = go.Figure(
-        [
-            go.Scatter(
-                x=months,
-                y=entitled,
-                name="Cumulative share",
-                mode="lines",
-                line={"color": light("muted"), "width": 2, "dash": "dash"},
-                hovertemplate="%{y:,.0f} node hours entitled<extra></extra>",
-                meta={"chrome": "muted"},
-            ),
-            go.Scatter(
-                x=months,
-                y=used,
-                name="Cumulative used",
-                mode="lines+markers",
-                line={"color": SERIES[0][0], "width": 2},
-                marker={"size": 8},
-                hovertemplate="%{y:,.0f} node hours used<extra></extra>",
-                meta={"slot": 0},
-            ),
-        ]
-    )
-    if months:
-        shortfall = entitled[-1] - used[-1]
-        figure.add_annotation(
-            x=months[-1],
-            y=max(used[-1], entitled[-1]),
-            text=(
-                f"{abs(shortfall):,.0f} node hours "
-                f"{'unused' if shortfall > 0 else 'beyond our share'} to date"
-            ),
-            showarrow=False,
-            yshift=18,
-            xanchor="right",
-            font={"size": 12},
-        )
-    figure.update_layout(
-        _layout(
-            title={
-                "text": "Cumulative node hours: used against entitled, complete months only",
-                "font": {"size": 16, "color": light("ink")},
-            },
-            yaxis={
-                "gridcolor": light("grid"),
-                "zerolinecolor": light("axis"),
-                "linecolor": light("axis"),
-                "tickfont": {"color": light("muted")},
-                "title": {"text": "Node hours, cumulative", "font": {"color": light("ink_soft")}},
-                "rangemode": "tozero",
-            },
         )
     )
     return figure
@@ -450,13 +415,24 @@ def figure_projects(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figur
     return figure
 
 
-def figure_heatmap(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figure:
+def figure_heatmap(
+    per_project: pl.DataFrame, totals: pl.DataFrame, allocation: pl.DataFrame | None = None
+) -> go.Figure:
     """Every project against every month, so dormancy is visible as blank space.
 
     Sequential rather than categorical: the question is magnitude, and this is
     the one figure that can carry all sixteen projects at once. Colour is on a
-    log scale because a month of real work is three orders of magnitude above a
-    test job, and a linear ramp would render everything but the peak as empty.
+    log scale in both views, because a month of real work is three orders of
+    magnitude above a test job and a linear ramp would render everything but
+    the peak as empty.
+
+    The second view divides each cell by that project's own
+    ``mean_monthly_allocation`` (see :func:`waldur_tools.reports.allocations`),
+    which is the only way to compare projects whose awards differ by orders of
+    magnitude. It runs past 100% freely and is meant to: the award is a lump for
+    a period, not a monthly ration, so a project doing a year's work in two
+    months reads far above 100% for both and is behaving normally. Projects
+    holding no credits at all have no denominator and stay blank.
     """
     months = totals["month"].to_list()
     labels = _months(totals)
@@ -466,8 +442,19 @@ def figure_heatmap(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figure
         .sort("total")["project_name"]
         .to_list()
     )
+    share: dict[str, float] = {}
+    if allocation is not None and not allocation.is_empty():
+        share = {
+            name: value
+            for name, value in zip(
+                allocation["project_name"].to_list(),
+                allocation["mean_monthly_allocation"].to_list(),
+                strict=True,
+            )
+            if value
+        }
 
-    z, text = [], []
+    absolute, absolute_text, relative, relative_text = [], [], [], []
     for name in order:
         rows = (
             per_project.filter(pl.col("project_name") == name)
@@ -476,15 +463,31 @@ def figure_heatmap(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figure
         )
         lookup = dict(zip(rows["month"].to_list(), rows["node_hours"].to_list(), strict=True))
         values = [lookup.get(month) for month in months]
-        z.append([None if v is None else math.log10(v + 1) for v in values])
-        text.append(["no allocation" if v is None else f"{v:,.0f} node hours" for v in values])
+        absolute.append([None if v is None else math.log10(v + 1) for v in values])
+        absolute_text.append(
+            ["no allocation" if v is None else f"{v:,.0f} node hours" for v in values]
+        )
+
+        rate = share.get(name)
+        percents = [None if v is None or not rate else 100 * v / rate for v in values]
+        # log10 of the percentage, so 100% sits at 2 and a project an order of
+        # magnitude either side of its own rate is one step of colour away.
+        relative.append([None if p is None else math.log10(p + 0.1) for p in percents])
+        relative_text.append(
+            [
+                "no credits awarded"
+                if rate is None
+                else ("no usage" if p is None else f"{p:,.0f}% of its {rate:,.0f}/month")
+                for p in percents
+            ]
+        )
 
     figure = go.Figure(
         go.Heatmap(
             x=labels,
             y=order,
-            z=z,
-            text=text,
+            z=absolute,
+            text=absolute_text,
             colorscale=[[i / (len(RAMP_LIGHT) - 1), c] for i, c in enumerate(RAMP_LIGHT)],
             hovertemplate="%{y}<br>%{x}: %{text}<extra></extra>",
             xgap=2,
@@ -500,6 +503,35 @@ def figure_heatmap(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figure
             meta={"ramp": True},
         )
     )
+    buttons = (
+        _buttons(
+            ["Node hours", "% of own allocation"],
+            [
+                [
+                    {
+                        "z": [absolute],
+                        "text": [absolute_text],
+                        "colorbar.title.text": "Node hours",
+                        "colorbar.tickvals": [[0, 1, 2, 3, 4, 5]],
+                        "colorbar.ticktext": [["0", "10", "100", "1k", "10k", "100k"]],
+                    },
+                    {},
+                ],
+                [
+                    {
+                        "z": [relative],
+                        "text": [relative_text],
+                        "colorbar.title.text": "% of allocation",
+                        "colorbar.tickvals": [[-1, 0, 1, 2, 3]],
+                        "colorbar.ticktext": [["0", "1%", "10%", "100%", "1000%"]],
+                    },
+                    {},
+                ],
+            ],
+        )
+        if share
+        else []
+    )
     figure.update_layout(
         _layout(
             height=170 + 26 * len(order),
@@ -514,6 +546,7 @@ def figure_heatmap(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figure
                 "tickfont": {"color": light("muted")},
                 "showgrid": False,
             },
+            updatemenus=buttons,
         )
     )
     return figure
@@ -525,15 +558,22 @@ def figure_totals_by_project(per_project: pl.DataFrame) -> go.Figure:
     One measure, one hue: colouring these bars by size would double-encode the
     length they already show. The horizontal form is for the project names,
     which are too long to sit under columns.
+
+    The axis is logarithmic, because the spread here is five orders of
+    magnitude and on a linear axis every project below the top two is a stub of
+    identical length. A log axis cannot draw a zero, so projects that never ran
+    are pinned at :data:`FLOOR_NODE_HOURS` and labelled ``0`` -- they are the
+    point of the figure and dropping them would be the worse distortion.
     """
     ranked = (
         per_project.group_by("project_name").agg(total=pl.col("node_hours").sum()).sort("total")
     )
     grand = ranked["total"].sum() or 1.0
     values = ranked["total"].to_list()
+    plotted = [max(value, FLOOR_NODE_HOURS) for value in values]
     figure = go.Figure(
         go.Bar(
-            x=values,
+            x=plotted,
             y=ranked["project_name"].to_list(),
             orientation="h",
             marker={"color": SERIES[0][0]},
@@ -541,7 +581,8 @@ def figure_totals_by_project(per_project: pl.DataFrame) -> go.Figure:
             textposition="outside",
             textfont={"color": light("ink_soft")},
             cliponaxis=False,
-            hovertemplate="%{y}: %{x:,.0f} node hours<extra></extra>",
+            customdata=values,
+            hovertemplate="%{y}: %{customdata:,.1f} node hours<extra></extra>",
             meta={"slot": 0},
         )
     )
@@ -555,10 +596,13 @@ def figure_totals_by_project(per_project: pl.DataFrame) -> go.Figure:
                 "font": {"size": 16, "color": light("ink")},
             },
             xaxis={
+                "type": "log",
                 "gridcolor": light("grid"),
                 "linecolor": light("axis"),
                 "tickfont": {"color": light("muted")},
-                "title": {"text": "Node hours", "font": {"color": light("ink_soft")}},
+                "title": {"text": "Node hours (log scale)", "font": {"color": light("ink_soft")}},
+                "tickvals": [FLOOR_NODE_HOURS, 1, 10, 100, 1_000, 10_000, 100_000],
+                "ticktext": ["0", "1", "10", "100", "1k", "10k", "100k"],
             },
             yaxis={"linecolor": light("axis"), "tickfont": {"color": light("muted")}},
         )
@@ -632,19 +676,18 @@ def figure_engagement(totals: pl.DataFrame, existing: pl.DataFrame | None) -> go
 
 
 def figure_queue(monthly_queue: pl.DataFrame) -> go.Figure | None:
-    """Jobs submitted and how long they waited -- demand, next to utilisation.
+    """Jobs submitted and how long they waited, month by month.
 
-    Low utilisation with long waits is a scheduling or job-shape problem; low
-    utilisation with short waits is a demand problem, and only one of those is
-    fixed by tuning anything. Buttons swap the measure rather than adding an
-    axis.
+    The fallback for a report built without a SLURM capture: these two series
+    are all the portal can answer, since its usage reports stop at daily
+    totals. With ``slurm-jobs.parquet`` present the three figures below replace
+    this one and say considerably more.
     """
     if monthly_queue.is_empty():
         return None
     labels = _months(monthly_queue)
     jobs = monthly_queue["num_jobs"].to_list()
     wait = monthly_queue["mean_wait_hours"].to_list()
-    users = monthly_queue["busiest_day_users"].to_list()
 
     figure = go.Figure(
         go.Bar(
@@ -671,7 +714,7 @@ def figure_queue(monthly_queue: pl.DataFrame) -> go.Figure | None:
                 "rangemode": "tozero",
             },
             updatemenus=_buttons(
-                ["Jobs", "Mean wait", "Busiest day, users"],
+                ["Jobs", "Mean wait"],
                 [
                     [
                         {"y": [jobs], "hovertemplate": "%{y:,.0f} jobs<extra></extra>"},
@@ -684,12 +727,389 @@ def figure_queue(monthly_queue: pl.DataFrame) -> go.Figure | None:
                         },
                         {"yaxis.title.text": "Mean queue wait (hours)"},
                     ],
+                ],
+            ),
+        )
+    )
+    return figure
+
+
+# --------------------------------------------------------------------------
+# Job shape
+#
+# These three read `slurm-jobs.parquet` and are omitted when it is absent. They
+# exist because the portal cannot answer any of them: it records how many jobs
+# ran on a day and how long they waited in total, and nothing about what any
+# one of them asked the scheduler for.
+# --------------------------------------------------------------------------
+
+#: Job size bands, in node hours consumed. Log-spaced, because job size on this
+#: machine spans several orders of magnitude -- the median job costs seconds of
+#: a single node, the largest hundreds of node hours -- and linear bands would
+#: put almost every job in the first one.
+SIZE_BANDS: tuple[tuple[float, str], ...] = (
+    (0.01, "up to 0.01"),
+    (0.1, "0.01 - 0.1"),
+    (1.0, "0.1 - 1"),
+    (10.0, "1 - 10"),
+    (100.0, "10 - 100"),
+    (float("inf"), "100 +"),
+)
+
+#: Requested-node bands. Not log-spaced but close to it, and cut where this
+#: machine's users actually cut: single-node jobs are the great majority, so one
+#: node gets a band to itself rather than being averaged in with two.
+NODE_BANDS: tuple[tuple[float, str], ...] = (
+    (1, "1 node"),
+    (3, "2 - 3"),
+    (7, "4 - 7"),
+    (15, "8 - 15"),
+    (31, "16 - 31"),
+    (float("inf"), "32 +"),
+)
+
+#: Requested node-hour bands: nodes multiplied by the wall clock in the batch
+#: script. This is the size of the hole the scheduler was asked to find.
+ASK_BANDS: tuple[tuple[float, str], ...] = (
+    (1.0, "up to 1"),
+    (10.0, "1 - 10"),
+    (100.0, "10 - 100"),
+    (1_000.0, "100 - 1k"),
+    (float("inf"), "1k +"),
+)
+
+#: The shortest wait the distribution figure will draw. A large share of jobs
+#: start within a second of being submitted, and a logarithmic axis has no room
+#: for zero; pinning them at a minute keeps that spike visible as a spike
+#: instead of dropping the whole population on the floor.
+FLOOR_WAIT_HOURS = 1 / 60
+
+
+def _band(value: float | None, bands: tuple[tuple[float, str], ...]) -> str | None:
+    if value is None:
+        return None
+    for edge, label in bands:
+        if value <= edge:
+            return label
+    return bands[-1][1]
+
+
+def _banded(jobs: pl.DataFrame, column: str, bands: tuple[tuple[float, str], ...]) -> pl.DataFrame:
+    labels = [label for _, label in bands]
+    return jobs.with_columns(
+        band=pl.col(column)
+        .map_elements(lambda value: _band(value, bands), return_dtype=pl.String)
+        .cast(pl.Enum(labels))
+    ).drop_nulls("band")
+
+
+def figure_job_sizes(jobs: pl.DataFrame) -> go.Figure | None:
+    """Where the jobs are, against where the node hours are.
+
+    Both series are percentages of their own total, which is the whole point:
+    plotted in their natural units a count of jobs and a sum of node hours
+    share no axis, but as shares of the month they are directly comparable, and
+    the gap between the two bars in a band is the answer. A machine whose job
+    count sits in the smallest band while its node hours sit in the largest is
+    being used by a few long runs and a great many one-node test jobs, and
+    those two populations need different things.
+
+    The slider moves through months; the first step is every month at once.
+    """
+    if jobs.is_empty():
+        return None
+    banded = _banded(jobs.filter(pl.col("node_hours").is_not_null()), "node_hours", SIZE_BANDS)
+    if banded.is_empty():
+        return None
+
+    labels = [label for _, label in SIZE_BANDS]
+    months = sorted(month for month in banded["month"].unique().to_list() if month is not None)
+
+    def shares(frame: pl.DataFrame) -> tuple[list[float], list[float], int]:
+        rolled = (
+            frame.group_by("band")
+            .agg(count=pl.len(), hours=pl.col("node_hours").sum())
+            .sort("band")
+        )
+        lookup = {row["band"]: (row["count"], row["hours"]) for row in rolled.iter_rows(named=True)}
+        total_jobs = sum(count for count, _ in lookup.values()) or 1
+        total_hours = sum(hours for _, hours in lookup.values()) or 1.0
+        counts = [100 * lookup.get(label, (0, 0.0))[0] / total_jobs for label in labels]
+        hours = [100 * lookup.get(label, (0, 0.0))[1] / total_hours for label in labels]
+        return counts, hours, int(total_jobs)
+
+    frames = [("All months", banded)] + [
+        (month.strftime("%b %Y"), banded.filter(pl.col("month") == month)) for month in months
+    ]
+    computed = [(name, *shares(frame)) for name, frame in frames]
+    first = computed[0]
+
+    figure = go.Figure(
+        [
+            go.Bar(
+                x=labels,
+                y=first[1],
+                name="Share of jobs",
+                marker={"color": SERIES[0][0]},
+                hovertemplate="%{y:,.1f}% of jobs<extra></extra>",
+                meta={"slot": 0},
+            ),
+            go.Bar(
+                x=labels,
+                y=first[2],
+                name="Share of node hours",
+                marker={"color": SERIES[1][0]},
+                hovertemplate="%{y:,.1f}% of node hours<extra></extra>",
+                meta={"slot": 1},
+            ),
+        ]
+    )
+    steps = [
+        {
+            "label": name,
+            "method": "update",
+            "args": [
+                {"y": [counts, hours]},
+                {"title.text": f"How big are the jobs? {name} — {total:,} jobs"},
+            ],
+        }
+        for name, counts, hours, total in computed
+    ]
+    figure.update_layout(
+        _layout(
+            barmode="group",
+            height=500,
+            margin={"l": 70, "r": 30, "t": 60, "b": 150},
+            title={
+                "text": f"How big are the jobs? All months — {first[3]:,} jobs",
+                "font": {"size": 16, "color": light("ink")},
+            },
+            xaxis={
+                "showgrid": False,
+                "linecolor": light("axis"),
+                "tickcolor": light("axis"),
+                "tickfont": {"color": light("muted")},
+                "title": {
+                    "text": "Node hours the job consumed",
+                    "font": {"color": light("ink_soft")},
+                },
+            },
+            yaxis={
+                "gridcolor": light("grid"),
+                "zerolinecolor": light("axis"),
+                "linecolor": light("axis"),
+                "tickfont": {"color": light("muted")},
+                "title": {"text": "% of the period's total", "font": {"color": light("ink_soft")}},
+                "rangemode": "tozero",
+            },
+            legend={
+                "orientation": "h",
+                "yanchor": "top",
+                "y": -0.30,
+                "x": 0,
+                "font": {"color": light("ink_soft")},
+            },
+            sliders=[
+                {
+                    "active": 0,
+                    "steps": steps,
+                    "x": 0,
+                    "len": 1.0,
+                    "pad": {"t": 70, "b": 10},
+                    "currentvalue": {
+                        "prefix": "Showing: ",
+                        "font": {"color": light("ink_soft"), "size": 13},
+                    },
+                    "font": {"color": light("muted"), "size": 11},
+                    "bgcolor": light("axis"),
+                    "bordercolor": light("grid"),
+                    "activebgcolor": SERIES[0][0],
+                    "tickcolor": light("axis"),
+                }
+            ],
+        )
+    )
+    return figure
+
+
+def figure_wait_by_shape(jobs: pl.DataFrame) -> go.Figure | None:
+    """What the queue charges for asking for more.
+
+    Wait is plotted against what the job *requested* -- ``--nodes`` and
+    ``--time`` from the batch script -- not against what it went on to use. The
+    scheduler only ever sees the request: a job that reserves 24 hours and
+    exits in one still had to wait for a 24-hour hole, and pricing the wait
+    against the one hour it used would hide exactly the behaviour worth
+    changing.
+
+    Median and mean both appear because they disagree, and the disagreement is
+    the finding: the mean is dragged up by a few jobs that waited weeks, so a
+    band where the two are far apart is a band where the typical experience and
+    the worst one are nothing alike.
+    """
+    if jobs.is_empty():
+        return None
+    waited = jobs.filter(pl.col("wait_seconds").is_not_null())
+    if waited.is_empty():
+        return None
+
+    def summarise(column: str, bands: tuple[tuple[float, str], ...]) -> dict[str, list[Any]]:
+        banded = _banded(waited.filter(pl.col(column).is_not_null()), column, bands)
+        labels = [label for _, label in bands]
+        rolled = (
+            banded.group_by("band")
+            .agg(
+                median=pl.col("wait_seconds").median() / 3600,
+                mean=pl.col("wait_seconds").mean() / 3600,
+                count=pl.len(),
+            )
+            .sort("band")
+        )
+        lookup = {row["band"]: row for row in rolled.iter_rows(named=True)}
+        return {
+            "labels": labels,
+            "median": [lookup.get(label, {}).get("median") for label in labels],
+            "mean": [lookup.get(label, {}).get("mean") for label in labels],
+            "count": [lookup.get(label, {}).get("count") or 0 for label in labels],
+        }
+
+    by_nodes = summarise("requested_nodes", NODE_BANDS)
+    by_ask = summarise("requested_node_hours", ASK_BANDS)
+
+    figure = go.Figure(
+        [
+            go.Bar(
+                x=by_nodes["labels"],
+                y=by_nodes["median"],
+                name="Median wait",
+                marker={"color": SERIES[0][0]},
+                customdata=by_nodes["count"],
+                hovertemplate="median %{y:,.2f} h over %{customdata:,} jobs<extra></extra>",
+                meta={"slot": 0},
+            ),
+            go.Bar(
+                x=by_nodes["labels"],
+                y=by_nodes["mean"],
+                name="Mean wait",
+                marker={"color": SERIES[1][0]},
+                customdata=by_nodes["count"],
+                hovertemplate="mean %{y:,.2f} h over %{customdata:,} jobs<extra></extra>",
+                meta={"slot": 1},
+            ),
+        ]
+    )
+    figure.update_layout(
+        _layout(
+            barmode="group",
+            height=480,
+            title={
+                "text": "How long a job waits, by what it asked for",
+                "font": {"size": 16, "color": light("ink")},
+            },
+            xaxis={
+                "showgrid": False,
+                "linecolor": light("axis"),
+                "tickcolor": light("axis"),
+                "tickfont": {"color": light("muted")},
+                "title": {"text": "Nodes requested", "font": {"color": light("ink_soft")}},
+            },
+            yaxis={
+                "gridcolor": light("grid"),
+                "zerolinecolor": light("axis"),
+                "linecolor": light("axis"),
+                "tickfont": {"color": light("muted")},
+                "title": {"text": "Queue wait (hours)", "font": {"color": light("ink_soft")}},
+                "rangemode": "tozero",
+            },
+            updatemenus=_buttons(
+                ["By nodes", "By node hours asked"],
+                [
                     [
-                        {"y": [users], "hovertemplate": "%{y:,.0f} people<extra></extra>"},
-                        {"yaxis.title.text": "People submitting, busiest day"},
+                        {
+                            "x": [by_nodes["labels"], by_nodes["labels"]],
+                            "y": [by_nodes["median"], by_nodes["mean"]],
+                            "customdata": [by_nodes["count"], by_nodes["count"]],
+                        },
+                        {"xaxis.title.text": "Nodes requested"},
+                    ],
+                    [
+                        {
+                            "x": [by_ask["labels"], by_ask["labels"]],
+                            "y": [by_ask["median"], by_ask["mean"]],
+                            "customdata": [by_ask["count"], by_ask["count"]],
+                        },
+                        {"xaxis.title.text": "Node hours requested (nodes x wall clock asked for)"},
                     ],
                 ],
             ),
+        )
+    )
+    return figure
+
+
+def figure_wait_distribution(jobs: pl.DataFrame) -> go.Figure | None:
+    """The whole spread of queue waits in each month, not just its average.
+
+    A mean wait hides the shape completely: the same 4-hour mean covers "every
+    job waited about four hours" and "nine jobs in ten started at once and the
+    tenth waited a fortnight", and those are different machines to be a user
+    of. A violin per month shows which one it was.
+
+    Drawn against log10 hours rather than on a log axis, because plotly fits
+    the kernel density in the axis's own coordinates: on a linear fit the lobe
+    covering four decades of fast jobs collapses to a line. The tick labels are
+    written back in hours and days so nothing has to be read as an exponent.
+    """
+    if jobs.is_empty():
+        return None
+    waited = jobs.filter(pl.col("wait_seconds").is_not_null())
+    if waited.is_empty():
+        return None
+
+    months = sorted(month for month in waited["month"].unique().to_list() if month is not None)
+    traces = []
+    for month in months:
+        hours = [
+            max(value / 3600, FLOOR_WAIT_HOURS)
+            for value in waited.filter(pl.col("month") == month)["wait_seconds"].to_list()
+        ]
+        if not hours:
+            continue
+        traces.append(
+            go.Violin(
+                x=[month.strftime("%b %Y")] * len(hours),
+                y=[math.log10(value) for value in hours],
+                name=month.strftime("%b %Y"),
+                showlegend=False,
+                spanmode="hard",
+                points=False,
+                width=0.85,
+                line={"color": SERIES[0][0], "width": 1},
+                meta={"slot": 0, "fill": True},
+                hoverinfo="skip",
+            )
+        )
+    if not traces:
+        return None
+
+    figure = go.Figure(traces)
+    figure.update_layout(
+        _layout(
+            height=480,
+            hovermode="closest",
+            title={
+                "text": "How long jobs waited, month by month",
+                "font": {"size": 16, "color": light("ink")},
+            },
+            yaxis={
+                "gridcolor": light("grid"),
+                "zerolinecolor": light("axis"),
+                "linecolor": light("axis"),
+                "tickfont": {"color": light("muted")},
+                "title": {"text": "Queue wait", "font": {"color": light("ink_soft")}},
+                "tickvals": [math.log10(FLOOR_WAIT_HOURS), -1, 0, 1, math.log10(24), 2, 3],
+                "ticktext": ["1 min", "6 min", "1 h", "10 h", "1 day", "4 days", "6 weeks"],
+            },
         )
     )
     return figure
@@ -728,6 +1148,86 @@ def projects_existing(
         },
         schema={"month": pl.Date, "projects": pl.Int64},
     )
+
+
+def committed(allocation: pl.DataFrame, months: list[date], horizon: date) -> list[float]:
+    """The awarded rate in force in each month: node hours a month, promised.
+
+    A project counts towards a month only while its award covers it, which is
+    the whole reason this is not one number. Summing every project's
+    ``mean_monthly_allocation`` regardless of dates treats awards that never
+    overlapped as concurrent, and quietly inflates the total the moment one
+    project's window closes. The two agree for as long as no award has expired
+    yet, and that agreement is a coincidence rather than a licence to take the
+    shortcut.
+
+    Compared against the entitlement this answers a question the usage figures
+    cannot: how much of our share has been *promised to anyone*. Usage cannot
+    exceed that for long, whatever anyone runs, because the credits behind it
+    are finite.
+    """
+    if allocation.is_empty() or "mean_monthly_allocation" not in allocation.columns:
+        return [0.0] * len(months)
+    starts = allocation["start_date"].to_list()
+    ends = allocation["end_date"].to_list()
+    rates = allocation["mean_monthly_allocation"].to_list()
+    totals = []
+    for month in months:
+        total = 0.0
+        for start, end, rate in zip(starts, ends, rates, strict=True):
+            if rate is None or start is None:
+                continue
+            finish = end or horizon
+            if start.replace(day=1) <= month <= finish.replace(day=1):
+                total += rate
+        totals.append(total)
+    return totals
+
+
+def credit_position(source: Snapshot | WaldurClient, customer: str | None) -> tuple[float, float]:
+    """``(credit held, credit never allocated to a project)``, in node hours.
+
+    Straight from ``customers``: ``customer_credit`` and
+    ``customer_unallocated_credit``. Two fields that are easy to miss and that
+    change the whole reading of this report, because they are the only
+    organisation-level quantities the portal carries -- everything else here is
+    per project or per month.
+
+    The difference between them is credit the customer has handed down to
+    projects, and it reconciles exactly: sum the ``limits.node`` of the live
+    (``OK``-state) ``Isambard 3`` marketplace resources, add the credits of any
+    project holding a balance with no provisioned resource, and you land on
+    ``customer_credit - customer_unallocated_credit`` to the penny. That
+    agreement is what makes the two fields trustworthy enough to quote; check it
+    against your own snapshot rather than taking it on trust.
+
+    So the allocated side is measured net of spend -- a project's limit *is* its
+    remaining balance -- which makes ``customer_credit`` a remaining figure too,
+    not a lifetime grant. An organisation can therefore hold a large unallocated
+    balance while its utilisation looks poor: unallocated credit reaches no
+    project, and a project is the only thing that can spend it.
+
+    Returns ``(0.0, 0.0)`` when the endpoint is missing or the fields are null,
+    which is what the legacy internal customer looks like.
+    """
+    try:
+        frame = load(source, ["customers"])["customers"]
+    except SnapshotError:
+        return (0.0, 0.0)
+    if frame.is_empty() or "customer_credit" not in frame.columns:
+        return (0.0, 0.0)
+    if customer is not None and "name" in frame.columns:
+        frame = frame.filter(pl.col("name") == customer)
+    if frame.is_empty():
+        return (0.0, 0.0)
+    numbers = frame.select(
+        held=pl.col("customer_credit").cast(pl.String).cast(pl.Float64, strict=False).sum(),
+        spare=pl.col("customer_unallocated_credit")
+        .cast(pl.String)
+        .cast(pl.Float64, strict=False)
+        .sum(),
+    ).row(0)
+    return (float(numbers[0] or 0.0), float(numbers[1] or 0.0))
 
 
 def load_projects(
@@ -852,6 +1352,7 @@ const SWAP = __SWAP__;
 const UNSWAP = Object.fromEntries(Object.entries(SWAP).map(([a, b]) => [b, a]));
 const RAMPS = __RAMPS__;
 const CHROME = __CHROME__;
+const FILL = __FILL__;
 
 function shade(hex, dark) { const m = dark ? SWAP : UNSWAP; return m[hex] || hex; }
 
@@ -872,10 +1373,20 @@ function paint(dark) {
           style['marker.line.color'] = [c.surface[i]];
         if (trace.line && typeof trace.line.color === 'string')
           style['line.color'] = [shade(trace.line.color, dark)];
+        if (trace.meta && trace.meta.fill) style['fillcolor'] = [FILL[i]];
         if (trace.textfont) style['textfont.color'] = [c.ink_soft[i]];
       }
       if (Object.keys(style).length) Plotly.restyle(div, style, [index]);
     });
+    // Sliders carry their own chrome, and relayouting a path that does not
+    // exist throws -- so this is added only for the figures that have one.
+    if (div.layout && div.layout.sliders && div.layout.sliders.length) {
+      Plotly.relayout(div, {
+        'sliders[0].bgcolor': c.axis[i], 'sliders[0].bordercolor': c.grid[i],
+        'sliders[0].tickcolor': c.axis[i], 'sliders[0].font.color': c.muted[i],
+        'sliders[0].currentvalue.font.color': c.ink_soft[i]
+      });
+    }
     Plotly.relayout(div, {
       'paper_bgcolor': c.surface[i], 'plot_bgcolor': c.surface[i],
       'font.color': c.ink_soft[i], 'title.font.color': c.ink[i],
@@ -968,11 +1479,17 @@ def render(
     nodes: int = TOTAL_NODES,
     share: float = DEFAULT_SHARE,
     customer: str | None = DEFAULT_CUSTOMER,
+    jobs: pl.DataFrame | None = None,
 ) -> str:
     """Build the whole report as one HTML string.
 
     Deliberately a string rather than a file: the CLI writes it, but a notebook
     can hand it straight to ``IPython.display.HTML``.
+
+    ``jobs`` is an optional SLURM capture from
+    :func:`waldur_tools.slurm.capture`. When it is supplied the report gains
+    three figures on job shape and queue wait that the portal cannot answer;
+    when it is not, everything else renders unchanged.
     """
     from plotly.io import to_html
 
@@ -992,17 +1509,24 @@ def render(
 
     existing = projects_existing(source, months, customer)
     queue = queue_monthly(source, codes)
+    allocation = reports.allocations(source, customer=customer)
+    awarded = committed(allocation, months, reports.as_of(source))
+    credit_held, unallocated = credit_position(source, customer)
+    monthly_share = float(totals["entitlement_node_hours"][-1]) or 1.0
+    unallocated_months = unallocated / monthly_share
+    ours = jobs.filter(pl.col("project_code").is_in(codes)) if jobs is not None else None
 
     figures = [
         (
-            figure_share(totals, nodes, share),
+            figure_share(totals, nodes, share, awarded),
             "Are we using our share?",
-            "Each column is a month's node hours; the line is what our share of the machine "
-            "is worth over that month. Above the line we borrowed capacity nobody else "
-            "claimed, which fair-share allows; below it we left our own share on the table. "
-            "Use the buttons to read the same comparison as a percentage or as an average "
-            "node count. The hatched column is the month the snapshot was taken in and is "
-            "incomplete by construction.",
+            "Each column is a month's node hours. The grey line is what our share of the "
+            "machine is worth; the dotted line is what has actually been <em>awarded</em> to "
+            "projects, at the rate their award periods imply. The distance between the two "
+            "lines is share nobody has been given, and no amount of running harder reaches "
+            "it. Usage above the dotted line is projects spending their awards faster than "
+            "the award period assumed. The hatched column is the month the snapshot was "
+            "taken in and is incomplete by construction.",
             _table(
                 totals,
                 {
@@ -1010,38 +1534,18 @@ def render(
                     "node_hours": "Node hours used",
                     "entitlement_node_hours": "Share worth",
                     "pct_of_entitlement": "% of share",
-                    "mean_nodes": "Nodes (mean)",
                     "active_projects": "Active projects",
                     "active_users": "Active users",
                 },
             ),
         ),
         (
-            figure_cumulative(totals),
-            "The gap, compounded",
-            "Monthly percentages bounce; the running totals do not. The distance between "
-            "the two lines is the share we have not converted into work since we started, "
-            "and it is the number worth quoting when the allocation is reviewed.",
-            _table(
-                complete.with_columns(
-                    used=pl.col("node_hours").cum_sum(),
-                    entitled=pl.col("entitlement_node_hours").cum_sum(),
-                ).with_columns(gap=pl.col("entitled") - pl.col("used")),
-                {
-                    "month": "Month",
-                    "used": "Cumulative used",
-                    "entitled": "Cumulative share",
-                    "gap": "Unconverted",
-                },
-            ),
-        ),
-        (
             figure_projects(per_project, totals),
             "Where the usage comes from",
-            "The seven largest projects by hue, the rest folded into a neutral band -- past "
-            "seven, colour stops telling series apart, and the full list is in the table. "
-            "The <em>% of the month</em> view answers a different question from the other "
-            "two: how concentrated a month was, regardless of how big it was.",
+            "The seven largest projects by hue, the rest folded into a neutral band; the "
+            "full list is in the table. The <em>% of the month</em> view answers a different "
+            "question from the other two: how concentrated a month was, regardless of how "
+            "big it was.",
             _table(
                 per_project.group_by("project_name")
                 .agg(
@@ -1057,20 +1561,34 @@ def render(
             ),
         ),
         (
-            figure_heatmap(per_project, totals),
+            figure_heatmap(per_project, totals, allocation),
             "Which projects are alive",
             "One cell per project per month, on a log colour scale so a test job and a "
             "production campaign are both visible. A row that stays at the background "
             "colour is a project that was set up and never used &mdash; capacity we hold "
-            "and do not convert, and the most actionable thing on this page.",
-            "",
+            "and do not convert, and the most actionable thing on this page. "
+            "The <em>% of own allocation</em> view measures each project against its "
+            "<strong>mean monthly allocation</strong>: the credits it holds, divided by the "
+            "number of months between its start and end dates. It passes 100% freely, "
+            "because an award is a lump for a period and not a monthly ration.",
+            _table(
+                allocation,
+                {
+                    "project_name": "Project",
+                    "total_credits": "Node hours awarded",
+                    "award_months": "Months",
+                    "mean_monthly_allocation": "Mean monthly allocation",
+                    "start_date": "From",
+                    "end_date": "To",
+                },
+            ),
         ),
         (
             figure_totals_by_project(per_project),
             "How concentrated we are",
             "If a couple of bars carry most of the total, our utilisation is one or two "
-            "research groups deep, and a single person changing project would move the "
-            "headline number more than any policy would.",
+            "research groups deep. The axis is logarithmic; a project that never ran is "
+            "drawn at the far left and labelled zero.",
             "",
         ),
         (
@@ -1082,22 +1600,63 @@ def render(
             "",
         ),
     ]
-    queue_figure = figure_queue(queue)
+
+    sizes = figure_job_sizes(ours) if ours is not None else None
+    shape = figure_wait_by_shape(ours) if ours is not None else None
+    spread = figure_wait_distribution(ours) if ours is not None else None
+    if sizes is not None:
+        figures.append(
+            (
+                sizes,
+                "How big are the jobs?",
+                "Both bars are shares of their own total, so a count of jobs and a sum of "
+                "node hours can be read side by side. Where the two disagree, the machine "
+                "is serving two different populations at once: many small jobs that cost "
+                "almost nothing, and a few large ones that are the entire bill. "
+                "The slider moves through months.",
+                "",
+            )
+        )
+    if shape is not None:
+        figures.append(
+            (
+                shape,
+                "What the queue charges for size",
+                "Wait against what the job <em>asked</em> for &mdash; the <code>--nodes</code> "
+                "and <code>--time</code> in the batch script, not what it went on to use. "
+                "That is all the scheduler ever sees. Where the mean towers over the median, "
+                "the typical wait and the worst wait are nothing alike.",
+                "",
+            )
+        )
+    if spread is not None:
+        figures.append(
+            (
+                spread,
+                "How long jobs waited",
+                "One violin per month: the width at a height is how many jobs waited about "
+                "that long. A mean cannot distinguish &ldquo;everyone waited four hours&rdquo; "
+                "from &ldquo;nine in ten started at once and the tenth waited a fortnight&rdquo;, "
+                "and those are different machines to be a user of.",
+                "",
+            )
+        )
+    queue_figure = figure_queue(queue) if ours is None else None
     if queue_figure is not None:
         figures.append(
             (
                 queue_figure,
                 "Demand, and what it cost to wait",
                 "Utilisation that is low <em>and</em> quick to schedule is a demand problem; "
-                "low utilisation with long waits is a job-shape or scheduling problem. Only "
-                "one of those is fixed by tuning anything, so it is worth knowing which.",
+                "low utilisation with long waits is a job-shape or scheduling problem. "
+                "Capture SLURM job records with <code>waldur-tools slurm-jobs</code> to "
+                "replace this with the job-shape figures.",
                 _table(
                     queue,
                     {
                         "month": "Month",
                         "num_jobs": "Jobs",
                         "mean_wait_hours": "Mean wait (h)",
-                        "busiest_day_users": "Busiest day, users",
                     },
                 ),
             )
@@ -1122,21 +1681,37 @@ def render(
         used_total = float(complete["node_hours"].sum())
         entitled_total = float(complete["entitlement_node_hours"].sum())
         mean_pct = 100 * used_total / entitled_total
-        gap = entitled_total - used_total
-        tiles += [
+        tiles.append(
             _tile(
                 "Since we started",
                 f"{mean_pct:,.0f}%",
                 f"over {complete.height} complete months",
-            ),
+            )
+        )
+    if not latest.is_empty() and awarded:
+        # Read off the latest complete month, not summed over every project
+        # that has ever held an award: two projects whose windows never
+        # overlapped were never committed at the same time.
+        index = months.index(latest.row(0, named=True)["month"])
+        rate = awarded[index]
+        entitled_month = float(latest.row(0, named=True)["entitlement_node_hours"])
+        if rate:
+            tiles.append(
+                _tile(
+                    "Awarded to projects",
+                    f"{100 * rate / entitled_month:,.0f}%",
+                    f"of our share is promised to anyone — {rate:,.0f} node hours a month",
+                )
+            )
+    if unallocated:
+        tiles.append(
             _tile(
-                "Unconverted to date",
-                f"{gap:,.0f}",
-                "node hours of our share, never used"
-                if gap > 0
-                else "node hours borrowed beyond our share",
-            ),
-        ]
+                "Credit never allocated",
+                f"{unallocated:,.0f}",
+                f"node hours held but assigned to no project — {unallocated_months:.1f} "
+                "months of our share",
+            )
+        )
     if not latest.is_empty():
         row = latest.row(0, named=True)
         peak = existing["projects"].max() if not existing.is_empty() else None
@@ -1166,6 +1741,7 @@ def render(
         _THEME_JS.replace("__SWAP__", swap)
         .replace("__RAMPS__", ramps)
         .replace("__CHROME__", chrome)
+        .replace("__FILL__", json.dumps(list(VIOLIN_FILL)))
     )
 
     body = "".join(
@@ -1186,6 +1762,26 @@ def render(
     stamp = getattr(source, "path", None)
     origin = f"snapshot {stamp.name}" if stamp is not None else "a live query"
     span = f"{months[0].strftime('%B %Y')} to {months[-1].strftime('%B %Y')}"
+
+    # The best month we have managed, which is the honest answer to "so how
+    # close do we get?" and keeps the opening from promising more than the
+    # figures deliver.
+    peak = complete.sort("pct_of_entitlement", descending=True).head(1)
+    best_month = ""
+    if not peak.is_empty():
+        row = peak.row(0, named=True)
+        best_month = (
+            f"The best month so far was {row['month'].strftime('%B %Y')}, at "
+            f"{row['pct_of_entitlement']:,.0f}%."
+        )
+    # Read off the same month as the tile, not the last month in the frame:
+    # that one is partial, and the two would disagree by a point on the page.
+    awarded_pct = 0.0
+    if awarded and not latest.is_empty():
+        row = latest.row(0, named=True)
+        awarded_pct = 100 * awarded[months.index(row["month"])] / float(
+            row["entitlement_node_hours"]
+        )
 
     return f"""<!doctype html>
 <html lang="en" data-theme="light">
@@ -1213,15 +1809,23 @@ def render(
 {share:.0%} — <strong>{held:,.1f} nodes, held for every hour of every month</strong>.
 That is {held * 24:,.0f} node hours a day, and roughly
 {held * 24 * 30:,.0f} a month. Every percentage on this page is usage measured
-against that, so 100% means we ran on average exactly the nodes we hold, not
-that we hit a ceiling: the share is an average entitlement, and SLURM fair-share
-lets a busy month borrow capacity nobody else claimed.</p>
+against that, so 100% would mean we ran, on average, exactly the nodes we
+hold.</p>
+
+<p>Nothing on the machine cuts us off. {best_month}
+Nor is the constraint a shortage of credit: we hold {credit_held:,.0f} node hours of it and
+<strong>{unallocated:,.0f} has never been allocated to a project</strong> —
+{unallocated_months:.1f} months of our entire share, sitting unassigned. What has
+reached projects amounts to about {awarded_pct:.0f}% of the share, the dotted
+line on the first chart, and that is the ceiling everything below it works
+under. <a href="#method">How to read these numbers</a> sets out what is and is
+not enforced.</p>
 
 <div class="kpis">{"".join(tiles)}</div>
 
 {body}
 
-<section class="method">
+<section class="method" id="method">
 <h2>How to read these numbers</h2>
 <ul>
 <li><strong>The source is one endpoint.</strong> Every figure comes from
@@ -1237,10 +1841,38 @@ small — but the shape of every curve is unchanged.</li>
 The portal also shows us separately funded UKRI and other, separately funded projects;
 counting those in would inflate our own share.</li>
 <li><strong>The last month is partial.</strong> It is hatched in the first
-figure, and excluded from the cumulative figure and from every headline
-average.</li>
-<li><strong>Above 100% is real.</strong> The share is not a quota. Months over
-the line are months we used capacity others had not claimed.</li>
+figure, and excluded from every headline average.</li>
+<li><strong>Nothing enforces the {share:.0%}, and nothing needs to.</strong>
+Isambard&nbsp;3 runs SLURM with every priority weight — fair share included —
+set to zero, so jobs are scheduled first come, first served with backfill; no
+account is held back for running over its share, and none is favoured for
+running under it. There is no organisation-level account to cap either: our
+projects hang directly off the root. The only enforced ceiling is
+<em>per project</em> — a <code>GrpTRESMins</code> on each project's SLURM
+account, which the portal sets from the credits that project has left. So what
+bounds the figures on this page is not the scheduler and not a shortage of
+credit: the organisation holds {credit_held:,.0f} node hours of credit, of which
+<strong>{unallocated:,.0f} has never been allocated to any project</strong> —
+{unallocated_months:.1f} months at 100% of our share, sitting unassigned. The
+binding constraint is how much of it reaches a project, and then whether that
+project has work to run.</li>
+<li><strong>Two percentages, two denominators.</strong> Everything at page level
+is measured against the organisation's share above.
+The <em>% of own allocation</em> view on the project heatmap is measured against
+each project's own award, and passes 100% routinely — a project may spend a
+year of credits in a month, because nothing paces the spend. The two are not
+comparable and are never drawn on the same axis.</li>
+<li><strong>Mean monthly allocation is ours, not the portal's.</strong> The
+relative view on the project heatmap divides a project's usage by its credits
+spread evenly over the months between its start and end dates. The portal
+grants credits as a lump for a period and never states a monthly figure, so
+this is a construction; <code>waldur-tools report allocations</code> prints its
+inputs.</li>
+<li><strong>Job shape comes from SLURM, not the portal.</strong> The three
+figures on job size and queue wait are built from <code>sacct</code> records
+captured by <code>waldur-tools slurm-jobs</code>. The portal's usage reports
+stop at daily totals and hold no record of an individual job, so what a job
+requested exists only on the cluster.</li>
 <li><strong>Every figure has a table view</strong> under it, and the same
 numbers come out of <code>waldur-tools report monthly -o monthly.csv</code>.</li>
 </ul>

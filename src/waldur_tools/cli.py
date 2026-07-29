@@ -10,6 +10,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from . import reports as report_module
+from . import slurm as slurm_module
 from . import viz as viz_report
 from .cache import DEFAULT_ENDPOINTS, Snapshot, SnapshotError, available, pull
 from .client import WaldurClient, WaldurError
@@ -143,6 +145,57 @@ def snapshots(
     console.print(table)
 
 
+@app.command("slurm-jobs")
+def slurm_jobs(
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Where to write the parquet (default: the cache root)"),
+    ] = None,
+    since: Annotated[str, typer.Option(help="Earliest submit time to include")] = "2024-01-01",
+    cluster: Annotated[
+        str, typer.Option(help="SLURM cluster to account against; 'all' for every one")
+    ] = slurm_module.DEFAULT_CLUSTER,
+    use: Annotated[
+        str | None, typer.Option(help="Snapshot naming the projects to pull (default: the newest)")
+    ] = None,
+    root: Annotated[Path | None, typer.Option(help="Override the cache directory")] = None,
+) -> None:
+    """Capture per-job SLURM records with `sacct`, for the job-shape figures.
+
+    Run this on a cluster login node. It is the one command here that reads
+    something other than the portal, because the portal has no per-job view:
+    its usage reports stop at daily totals, so what a job *asked for* -- the
+    `--nodes` and `--time` in the batch script -- exists only in SLURM.
+
+    Accounts against the `i3` cluster by default and not whichever one this
+    login node belongs to, because `i3macs` is unmetered and invisible to every
+    other figure in the report.
+
+    `viz` picks the file up automatically from the cache root. Without it the
+    report still builds; it just leaves out the figures that need job shape.
+    """
+    directory = root or Settings.from_env().cache_dir
+    source = Snapshot.named(directory, use) if use else Snapshot.latest(directory)
+    codes = report_module.in_scope(source)["project_code"].to_list()
+    frame = slurm_module.capture(codes, start=since, cluster=cluster)
+    target = output or (directory / slurm_module.JOBS_FILENAME)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(target)
+
+    first, last = (
+        frame.select(
+            first=pl.col("month").min().dt.strftime("%b %Y"),
+            last=pl.col("month").max().dt.strftime("%b %Y"),
+        ).row(0)
+        if frame.height
+        else (None, None)
+    )
+    covered = f"{first} to {last}" if first else "no jobs"
+    console.print(
+        f"[green]Wrote {frame.height:,} jobs to {target}[/] ({len(codes)} projects, {covered})"
+    )
+
+
 @app.command()
 def report(
     which: Annotated[str, typer.Argument(help=f"One of: {', '.join(REPORTS)}")],
@@ -208,6 +261,10 @@ def viz(
     customer: Annotated[
         str, typer.Option(help="Organisation to report on; '' for every visible project")
     ] = DEFAULT_CUSTOMER,
+    jobs: Annotated[
+        Path | None,
+        typer.Option(help="SLURM capture for the job-shape figures (default: the cache root)"),
+    ] = None,
     live: Annotated[bool, typer.Option(help="Query the API directly instead of the cache")] = False,
     use: Annotated[
         str | None, typer.Option(help="Snapshot name to read (default: the newest)")
@@ -219,14 +276,27 @@ def viz(
     One file, plotly.js inlined: it opens offline, needs no server, and can be
     sent to someone who will never run this tool. The numbers are the same ones
     `report monthly` and `report monthly-totals` print.
+
+    If `slurm-jobs.parquet` is in the cache root it is picked up automatically
+    and adds three figures on job shape and queue wait; without it the rest of
+    the report is unchanged.
     """
+    directory = root or Settings.from_env().cache_dir
+    captured = slurm_module.load_jobs(jobs, root=directory)
+    if jobs is not None and captured.is_empty():
+        error_console.print(f"[yellow]No jobs read from {jobs}; job-shape figures omitted[/]")
+    frame = None if captured.is_empty() else captured
+
     if live:
         with WaldurClient() as client:
-            page = viz_report.render(client, nodes=nodes, share=share, customer=customer or None)
+            page = viz_report.render(
+                client, nodes=nodes, share=share, customer=customer or None, jobs=frame
+            )
     else:
-        directory = root or Settings.from_env().cache_dir
         source = Snapshot.named(directory, use) if use else Snapshot.latest(directory)
-        page = viz_report.render(source, nodes=nodes, share=share, customer=customer or None)
+        page = viz_report.render(
+            source, nodes=nodes, share=share, customer=customer or None, jobs=frame
+        )
 
     output.write_text(page, encoding="utf-8")
     console.print(
