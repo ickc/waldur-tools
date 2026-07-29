@@ -24,6 +24,10 @@ quoting a figure:
    `entitlement_node_hours` is `nodes * share * 24 * days_in_month` — a figure
    assembled from two numbers you pass in, not one the API returns. See
    [The share, and what it assumes](#the-share-and-what-it-assumes).
+4. **One endpoint is fetched a month at a time**, because paging it end to end
+   returns some rows twice and drops others. Nothing about the *numbers* is
+   changed; the pull is. See
+   [One endpoint cannot be paged straight through](#one-endpoint-cannot-be-paged-straight-through).
 
 Everything else is the portal's own view, rearranged into a table.
 
@@ -234,11 +238,18 @@ band rather than orders of magnitude off. But it is a reading. If it
 turns out to be node *days*, every percentage in the report is ~24× too small,
 while the shape of every curve is unchanged.
 
-**Above 100% is not an error.** The share is an average entitlement, not a
-quota: SLURM fair-share lets a busy month borrow capacity nobody else claimed.
-Some months in a snapshot exceed it, occasionally by a wide margin. This is
-the opposite of `utilisation.month_vs_limit_pct`, which *cannot* exceed 100%
-because its denominator is a node limit that tracks the remaining balance.
+**Above 100% is not an error, but check the pull first.** The share is an
+average entitlement rather than a quota, and SLURM fair-share lets a busy month
+borrow capacity nobody else claimed — so a month over 100% is possible. It is
+also what a duplicated pull looks like, and that is what the months over 100%
+in the snapshots taken before the paging fix actually were: see
+[One endpoint cannot be paged straight through](#one-endpoint-cannot-be-paged-straight-through).
+Before quoting a figure above 100%, cross-check it against the
+organisation dashboard's *Cost* card in the portal, whose `incurred_costs` is
+the same node hours by another route.
+
+This is the opposite of `utilisation.month_vs_limit_pct`, which *cannot* exceed
+100% because its denominator is a node limit that tracks the remaining balance.
 
 ### `user-usage` — from `openportal-allocation-user-usage`
 
@@ -368,6 +379,65 @@ The typed API is still one attribute away — pass `WaldurClient.raw` to any
 Pagination follows `Link` headers, with a `seen`-set guard: a page that links to
 itself raises rather than spinning forever. That guard exists because a test
 once hung on exactly that.
+
+### One endpoint cannot be paged straight through
+
+`page`/`page_size` is `LIMIT`/`OFFSET` underneath, and that only enumerates a
+table once if the query is **totally** ordered.
+`openportal-allocation-user-usage` is ordered by `(year, month)` and nothing
+else, so within a month the database returns rows in whatever order suits it —
+a different one per request. Walking the whole table therefore hands back some
+rows two or three times and never shows others.
+
+It is not subtle. A pull of all tens of thousands of rows contained thousands
+of duplicate `(allocation, user, year, month)` keys, most of them straddling
+two adjacent pages, and correspondingly a comparable number of rows that never
+appeared at all. Summed into a monthly total:
+
+| Node hours | paged end to end | pulled month by month | portal dashboard |
+| --- | --- | --- | --- |
+| Month A | over 100% | under 100% | — |
+| Month B | over 100% | under 100% | matches |
+| Month C | **well over 100%** | **under 100%** | **matches** |
+| Month D | matches | matches | matches |
+
+The middle column is right and the left one is not, which is where the
+inflated headline came from. The figure was also *irreproducible* —
+every pull shuffled differently — which is the tell for this class of bug.
+
+So `cache.BY_MONTH` routes that endpoint through
+`WaldurClient.iter_list_by_month()`, which walks `(year, month)` from
+`client.EARLIEST_MONTH` to today and pulls each month as its own filtered
+query. Filtering shrinks the queryset to something the server enumerates
+consistently: month-at-a-time pulls come back duplicate-free and match the
+portal's own dashboard to within rounding. `cache.fetch()` is the single place
+that chooses, so `snapshot` and `report --live` cannot drift apart.
+
+Three guards, because every failure here is silent:
+
+- **The filter might be ignored.** Waldur's DRF filters drop parameters they do
+  not recognise (see the warning above), so an endpoint without `year`/`month`
+  would be fetched once per month and yield the whole table over and over.
+  A count for `year=1900` must come back zero, or the walk refuses to start.
+- **A month might come back short.** Each month's row count is checked against
+  `X-Result-Count` for that same filter, and the months must add up to the
+  unfiltered total.
+- **A row might come back twice anyway.** Duplicates and the omissions that
+  accompany them cancel out in a row *count*, so counting cannot see them.
+  `cache.ROW_KEYS` names the columns that identify a row and `cache.check()`
+  rejects the pull if any key repeats — on write *and* on read, so an older
+  snapshot taken before this fix fails loudly instead of quietly reporting a
+  wildly inflated month.
+
+`check()` raises rather than de-duplicating, deliberately. A repeated row means
+the pull enumerated the table unreliably, and for every row returned twice
+another was returned not at all; keeping one of each would leave a snapshot
+that looks clean and still under-reports. The fix is to pull again, not to
+tidy up after.
+
+Other endpoints do not need this — `openportal-associations` pages all its
+rows cleanly — and the cost is one extra count request per month, so the list
+stays as short as the evidence supports.
 
 This deployment publishes **no OpenAPI schema** (`/api/schema/`, `/api-docs/`
 and friends all 404), so the generated client cannot be regenerated against it.

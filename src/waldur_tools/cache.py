@@ -5,6 +5,13 @@ and change slowly. Pulling them once into parquet keeps analysis fast, keeps
 load off the portal, and lets you diff the estate over time by keeping more
 than one snapshot around.
 
+**Not every endpoint can be fetched the same way.** ``BY_MONTH`` names the ones
+that have to be pulled a calendar month at a time because paging them end to
+end returns some rows twice and drops others, and ``ROW_KEYS`` names the
+columns that let :func:`check` notice when that happened anyway. Both are
+enforced on write *and* on read, so a snapshot taken before this was understood
+raises instead of quietly reporting three times the usage.
+
 **The cache is append-only, and a snapshot is immutable.** :func:`pull` always
 writes a whole new timestamped directory; nothing ever edits one in place.
 Refreshing therefore means taking another full snapshot -- roughly nine minutes
@@ -51,6 +58,20 @@ DEFAULT_ENDPOINTS: tuple[str, ...] = (
     "marketplace-component-usages",
     "invoices",
 )
+
+#: Endpoints that cannot be paged end to end, and are pulled one calendar month
+#: at a time instead -- see :meth:`waldur_tools.client.WaldurClient.iter_list_by_month`
+#: for why, and DEVELOPER.md for the numbers. Costs one extra count request per
+#: month; buys a pull that is not quietly wrong.
+BY_MONTH: frozenset[str] = frozenset({"openportal-allocation-user-usage"})
+
+#: Columns that identify a row uniquely, for endpoints where the portal has been
+#: seen to hand back the same row more than once. Checked on every pull, because
+#: duplicates and omissions cancel out in a row *count* and so slip past the
+#: ``X-Result-Count`` check that catches everything else.
+ROW_KEYS: dict[str, tuple[str, ...]] = {
+    "openportal-allocation-user-usage": ("allocation", "user", "year", "month"),
+}
 
 META_FILENAME = "meta.json"
 
@@ -145,6 +166,44 @@ def available(root: Path) -> list[Snapshot]:
     return [Snapshot(path) for path in sorted(root.glob("*")) if (path / META_FILENAME).exists()]
 
 
+def fetch(client: WaldurClient, endpoint: str) -> pl.DataFrame:
+    """Read one endpoint in full, by whichever paging strategy it needs.
+
+    The single place that decides between a straight pull and a month-at-a-time
+    one, so ``snapshot`` and ``report --live`` cannot drift apart -- a live
+    report reading the endpoint the naive way would reproduce exactly the
+    inflated monthly totals the snapshot no longer has.
+    """
+    records = (
+        client.iter_list_by_month(endpoint) if endpoint in BY_MONTH else client.iter_list(endpoint)
+    )
+    return check(endpoint, to_frame(records))
+
+
+def check(endpoint: str, frame: pl.DataFrame) -> pl.DataFrame:
+    """Return ``frame`` unless the portal repeated a row it should not have.
+
+    Deliberately raises rather than de-duplicating. A repeated row means the
+    pull enumerated the table unreliably, and where a row came back twice
+    another came back not at all -- so the duplicates are the symptom and the
+    missing rows are the damage. Silently keeping one of each would leave a
+    snapshot that looks clean and still under-reports.
+    """
+    keys = ROW_KEYS.get(endpoint, ())
+    # All of the key or none of it: two thirds of a compound key is not a key,
+    # and checking uniqueness on it would reject rows that are perfectly fine.
+    if not keys or frame.is_empty() or not set(keys) <= set(frame.columns):
+        return frame
+    repeats = frame.height - frame.unique(subset=list(keys)).height
+    if repeats:
+        raise SnapshotError(
+            f"{endpoint}: {repeats} of {frame.height} rows repeat a "
+            f"({', '.join(keys)}) already seen. The portal paged the table "
+            "inconsistently; retry the snapshot."
+        )
+    return frame
+
+
 def pull(
     client: WaldurClient,
     endpoints: Sequence[str] = DEFAULT_ENDPOINTS,
@@ -156,7 +215,7 @@ def pull(
     snapshot = Snapshot.create(root or client.settings.cache_dir, name)
     counts: dict[str, int] = {}
     for endpoint in endpoints:
-        frame = to_frame(client.iter_list(endpoint))
+        frame = fetch(client, endpoint)
         snapshot.write(endpoint, frame)
         counts[endpoint] = frame.height
     snapshot.write_meta(counts)
@@ -166,5 +225,5 @@ def pull(
 def load(source: Snapshot | WaldurClient, endpoints: Iterable[str]) -> dict[str, pl.DataFrame]:
     """Read endpoints from a snapshot, or straight from the API if given a client."""
     if isinstance(source, Snapshot):
-        return {endpoint: source.read(endpoint) for endpoint in endpoints}
-    return {endpoint: to_frame(source.iter_list(endpoint)) for endpoint in endpoints}
+        return {endpoint: check(endpoint, source.read(endpoint)) for endpoint in endpoints}
+    return {endpoint: fetch(source, endpoint) for endpoint in endpoints}

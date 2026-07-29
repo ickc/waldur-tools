@@ -341,7 +341,14 @@ def _entitlement(nodes: int, share: float) -> pl.Expr:
 
     ``nodes * share`` nodes held for every hour of the month. It is an average
     entitlement rather than a cap: SLURM fair-share lets a busy month borrow
-    capacity nobody else claimed, which is why the percentage can exceed 100.
+    capacity nobody else claimed, so a percentage above 100 is possible.
+
+    It is also, historically, what a bad pull looked like. Paging
+    ``openportal-allocation-user-usage`` end to end returned some rows twice and
+    put several months well over 100%; pulled a month at a time (see
+    :const:`waldur_tools.cache.BY_MONTH`) the same months came back well under
+    100%, matching the portal's own dashboard. Treat anything over 100% as
+    worth cross-checking rather than as a finding.
     """
     days = pl.col("month").map_elements(
         lambda value: calendar.monthrange(value.year, value.month)[1],
@@ -364,6 +371,11 @@ def monthly(
     one row per user, allocation and month, and its ``node_usage`` *is*
     cumulative-safe to sum, unlike the identically named field on
     ``openportal-allocations``. This groups those rows by project and month.
+
+    Summing is only safe because the pull is. That endpoint cannot be paged end
+    to end -- it repeats rows across page boundaries -- so it is fetched a month
+    at a time and checked for repeated keys before any of this runs. See
+    :const:`waldur_tools.cache.BY_MONTH`.
 
     ``entitlement_node_hours`` is the whole organisation's monthly share --
     ``nodes * share * 24 * days_in_month``, so 384 nodes at 10% is roughly

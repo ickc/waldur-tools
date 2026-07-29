@@ -136,6 +136,13 @@ another. So **refreshing the cache means running `snapshot` again**; there is no
 time (details in [DEVELOPER.md](DEVELOPER.md#the-cache)). `snapshots` lists what
 you have and `report --use NAME` reads an older one.
 
+> **Snapshots taken before the paging fix below are wrong, and will now say so.**
+> `openportal-allocation-user-usage` was pulled by paging the whole table, which
+> that endpoint does not support; the result double-counted usage in every month
+> before the pull's last. Any command reading such a snapshot now fails with
+> `SnapshotError: ... rows repeat ...`. Take a fresh one — the numbers it
+> produces agree with the portal's own organisation dashboard.
+
 ### Administrative scope
 
 The portal is multi-tenant, and it is inconsistent about it: `allocations`,
@@ -191,6 +198,13 @@ Findings from working against a live deployment, which shaped the reports:
   one row per user, allocation and calendar month — so every figure in `viz` is
   built from it. Its `node_usage` *is* safe to sum, unlike the field of the same
   name on allocations.
+- That same endpoint **cannot be paged end to end**. It is ordered by
+  `(year, month)` and nothing else, so `LIMIT`/`OFFSET` returns some rows two or
+  three times and never returns others: thousands of duplicate keys in a tens of thousands of-row
+  pull, which inflated one month from the true figure node hours to well over the true figure. It is
+  fetched a month at a time instead, and both the pull and every read are
+  checked for repeated rows. Details in
+  [DEVELOPER.md](DEVELOPER.md#one-endpoint-cannot-be-paged-straight-through).
 - Money and usage arrive as decimal *strings*, hence `frames.numeric`.
 - `slurm-*`, `events` and `keys` return empty; `support-issues` returns 424.
 - Unrecognised query parameters are silently ignored, so an unsupported filter

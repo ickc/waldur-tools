@@ -149,8 +149,16 @@ def accounting_summary():
 
 @pytest.fixture
 def user_usage_rows():
+    """``allocation`` and ``user`` are carried because they are the row's key.
+
+    One row per allocation, user and month is what the endpoint promises, and
+    ``cache.ROW_KEYS`` holds it to that -- so the fixture has to be faithful
+    about those two fields or the guard has nothing to check.
+    """
     return [
         {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
             "username": "alice.abc1.brics",
             "full_name": "Alice",
             "node_usage": "1.5",
@@ -158,6 +166,8 @@ def user_usage_rows():
             "month": 1,
         },
         {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
             "username": "alice.abc1.brics",
             "full_name": "Alice",
             "node_usage": "2.5",
@@ -166,6 +176,8 @@ def user_usage_rows():
         },
         # A second project of ours, so monthly aggregation has more than one.
         {
+            "allocation": f"{API_URL}/api/openportal-allocations/bbb/",
+            "user": f"{API_URL}/api/users/bob/",
             "username": "bob.abc2.brics",
             "full_name": "Bob",
             "node_usage": "1.0",
@@ -174,6 +186,8 @@ def user_usage_rows():
         },
         # Another organisation's user: visible on this endpoint, but not ours.
         {
+            "allocation": f"{API_URL}/api/openportal-allocations/zzz/",
+            "user": f"{API_URL}/api/users/carol/",
             "username": "carol.zzz.brics",
             "full_name": "Carol",
             "node_usage": "99.0",
