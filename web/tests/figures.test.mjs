@@ -22,6 +22,7 @@ import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
   figureTotalsByProject,
 } from '../src/figures.js';
+import { reconcileTable } from '../src/page.js';
 import { CHROME, SERIES } from '../src/palette.js';
 import * as reports from '../src/reports.js';
 
@@ -98,6 +99,29 @@ describe('every figure', () => {
             assert.ok(PALETTE.has(colour), `${name} uses ${colour}, which is not in the palette`);
           }
         }
+      }
+    }
+  });
+
+  it('keeps the title clear of the view buttons', () => {
+    // Found by loading the extension and looking at it, which is the only way
+    // it could have been found: the specification was correct and the geometry
+    // was wrong, so the title rendered as "…came from, month by mon|" with the
+    // button row drawn over the rest of it.
+    //
+    // Three things want the strip above the plot — plotly's modebar, the
+    // button row and the title. A centred title and a right-anchored button
+    // row grow towards each other, and the narrower the window the sooner they
+    // touch. So the title is pinned left in *container* coordinates, on its
+    // own band above the buttons, and the top margin is deep enough for both.
+    for (const [name, figure] of every()) {
+      const { title, margin, updatemenus } = figure.layout;
+      assert.equal(title.xanchor, 'left', `${name} centres its title into the button row`);
+      assert.equal(title.xref, 'container', `${name} anchors its title to the plot, not the figure`);
+      if ((updatemenus ?? []).length) {
+        // The button row sits at y=1.03 in paper coordinates and is about
+        // 30px tall; the title needs a band of its own above that.
+        assert.ok(margin.t >= 96, `${name} has only ${margin.t}px above the plot for both`);
       }
     }
   });
@@ -209,5 +233,63 @@ describe('the heatmap', () => {
 describe('the demand figure', () => {
   it('is absent rather than empty when the portal has no usage reports', () => {
     assert.equal(figureQueue([]), null);
+  });
+});
+
+describe('the invoice cross-check table', () => {
+  // Two routes to one number. What the table has to preserve is that the
+  // reader can tell a known accounting quirk from an unstable pull, and
+  // neither of those is legible from a count of failures alone.
+  const rows = [
+    { month: '2026-01', node_hours: 1000, incurred_costs: 1000, difference: 0,
+      pct_difference: 0, status: 'ok', invoice_state: 'created', is_partial: false },
+    { month: '2026-02', node_hours: 1200, incurred_costs: 900, difference: 300,
+      pct_difference: 33.3, status: 'usage high', invoice_state: 'created',
+      is_partial: false },
+    { month: '2026-03', node_hours: 400, incurred_costs: null, difference: null,
+      pct_difference: null, status: 'no invoice', invoice_state: null, is_partial: true },
+  ];
+
+  it('lists every month, not only the ones that disagree', () => {
+    // A gap with no agreeing months beside it has no scale to be read against.
+    const html = reconcileTable(rows);
+    for (const label of ['Jan 2026', 'Feb 2026', 'Mar 2026']) {
+      assert.ok(html.includes(label), `${label} is missing from the table`);
+    }
+  });
+
+  it('opens itself when something disagrees, and stays shut when nothing does', () => {
+    assert.match(reconcileTable(rows), /<details class="reconcile" open>/);
+    const clean = rows.filter((row) => row.status !== 'usage high');
+    assert.match(reconcileTable(clean), /<details class="reconcile">/);
+  });
+
+  it('names the failure in words, never in colour alone', () => {
+    // Several series colours on this page already sit below 3:1 contrast; a
+    // tinted row on its own would not be a signal for every reader.
+    const html = reconcileTable(rows);
+    assert.ok(html.includes('usage high'));
+    assert.ok(html.includes('class="flagged"'));
+  });
+
+  it('shows both routes and the gap, signed, rather than a verdict', () => {
+    const html = reconcileTable(rows);
+    assert.ok(html.includes('Node hours used') && html.includes('Invoiced'));
+    // Positive means usage nobody billed -- the shape a duplicated page takes.
+    assert.match(html, /\+33\.3%/);
+  });
+
+  it('marks the month in progress, which is expected to disagree', () => {
+    assert.match(reconcileTable(rows), /Mar 2026 <em>\(partial\)<\/em>/);
+  });
+
+  it('draws a missing side as a dash, never as a zero', () => {
+    // A month absent from one side is not a zero on it, and rendering it as
+    // one would invent a 100% disagreement out of nothing.
+    assert.ok(reconcileTable(rows).includes('class="na"'));
+  });
+
+  it('renders nothing at all when there is nothing to check', () => {
+    assert.equal(reconcileTable([]), '');
   });
 });

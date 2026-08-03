@@ -31,8 +31,15 @@ function layout(overrides = {}) {
     font: { family: FONT, size: 13, color: light('ink_soft') },
     paper_bgcolor: light('surface'),
     plot_bgcolor: light('surface'),
-    margin: { l: 70, r: 30, t: 60, b: 110 },
-    height: 460,
+    // `t` is deep enough for two bands, because on every figure with view
+    // buttons the top of the plot carries three things that all want the same
+    // strip: plotly's modebar, the button row, and the title. At t=60 they
+    // shared one line and the buttons drew straight over the title -- "Which
+    // projects the usage came from, month by mon|" -- which no assertion in
+    // `figures.test.mjs` could see, because the specification was correct and
+    // only the geometry was wrong. See `title()` for the other half.
+    margin: { l: 70, r: 30, t: 104, b: 110 },
+    height: 500,
     hovermode: 'x unified',
     hoverlabel: { font: { family: FONT } },
     // Below the axis, not above it: the top band already carries the title and
@@ -103,8 +110,28 @@ function buttons(labels, args) {
   ];
 }
 
+/**
+ * A figure title, pinned to the top-left of the whole figure.
+ *
+ * Anchored in *container* coordinates rather than paper ones, so it sits above
+ * the band the view buttons occupy instead of centring itself into it. Centred
+ * was the default and it put the title on a collision course with a
+ * right-anchored button row: the two grow towards each other, and the narrower
+ * the window the sooner they meet. Left-aligned in its own band, a long title
+ * runs out of figure rather than into the buttons.
+ */
 function title(text) {
-  return { text, font: { size: 16, color: light('ink') } };
+  return {
+    text,
+    font: { size: 16, color: light('ink') },
+    x: 0,
+    xanchor: 'left',
+    xref: 'container',
+    y: 1,
+    yanchor: 'top',
+    yref: 'container',
+    pad: { l: 8, t: 10 },
+  };
 }
 
 /**
@@ -377,7 +404,7 @@ export function figureHeatmap(perProject, totals, allocation) {
     layout: layout({
       height: 170 + 26 * order.length,
       hovermode: 'closest',
-      margin: { l: 240, r: 30, t: 60, b: 60 },
+      margin: { l: 240, r: 30, t: 104, b: 60 },
       title: title('Project activity: node hours per project per month'),
       yaxis: { linecolor: light('axis'), tickfont: { color: light('muted') }, showgrid: false },
       updatemenus: rates.size
@@ -449,7 +476,7 @@ export function figureTotalsByProject(ranked) {
     layout: layout({
       height: 170 + 26 * ranked.length,
       hovermode: 'closest',
-      margin: { l: 240, r: 120, t: 60, b: 60 },
+      margin: { l: 240, r: 120, t: 104, b: 60 },
       title: title('Total node hours per project, all months'),
       xaxis: {
         type: 'log',
