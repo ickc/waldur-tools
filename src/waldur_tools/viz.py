@@ -237,7 +237,10 @@ def figure_share(
     )
 
     hundred = [100.0] * len(months)
-    awarded = awarded or []
+    # Omitting the awards means "no second line", not "a line of length zero":
+    # pad to the month count so the strict zip below stays a real length check
+    # on a list a caller did pass, rather than failing on the default.
+    awarded = awarded or [0.0] * len(months)
     awarded_pct = [
         100 * value / limit if limit else 0.0
         for value, limit in zip(awarded, entitlement, strict=True)
@@ -1779,8 +1782,8 @@ def render(
     awarded_pct = 0.0
     if awarded and not latest.is_empty():
         row = latest.row(0, named=True)
-        awarded_pct = 100 * awarded[months.index(row["month"])] / float(
-            row["entitlement_node_hours"]
+        awarded_pct = (
+            100 * awarded[months.index(row["month"])] / float(row["entitlement_node_hours"])
         )
 
     return f"""<!doctype html>

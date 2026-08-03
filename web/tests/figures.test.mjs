@@ -1,0 +1,213 @@
+/**
+ * The properties the figures must not lose, in the spirit of `test_viz.py`.
+ *
+ * These are the rules that are easy to undo in a refactor and invisible in a
+ * diff: a second y-axis quietly appearing, an eighth hue being generated, a
+ * colour that the theme switch cannot swap because it is not in the palette.
+ * None of them throws; they just produce a figure that misleads.
+ *
+ * **This does not open a browser.** It builds the figure specifications and
+ * checks them; whether plotly draws anything is a question only a browser can
+ * answer, and the note at the end of DEVELOPER.md's testing section applies
+ * here with full force.
+ */
+
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, it } from 'node:test';
+
+import {
+  figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
+  figureTotalsByProject,
+} from '../src/figures.js';
+import { CHROME, SERIES } from '../src/palette.js';
+import * as reports from '../src/reports.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const fixture = JSON.parse(readFileSync(join(here, 'fixture.json'), 'utf-8'));
+const expected = JSON.parse(readFileSync(join(here, 'expected.json'), 'utf-8'));
+
+const { as_of: asOf, customer, nodes, share } = expected;
+
+const scope = reports.inScope(fixture['openportal-allocations']);
+const rows = reports.monthlyRows(
+  fixture['openportal-allocation-user-usage'],
+  scope,
+  customer,
+);
+const totals = reports.monthlyTotals(rows, { nodes, share, asOf });
+const perProject = reports.monthly(rows, { nodes, share });
+const months = totals.map((row) => row.month);
+const allocation = reports.allocationsReport(
+  scope,
+  fixture['openportal-accounting-summary'],
+  { asOf, customer },
+);
+const awarded = reports.committed(allocation, months, asOf);
+
+const every = () => [
+  ['share', figureShare(totals, nodes, share, awarded)],
+  ['projects', figureProjects(reports.rankedBands(perProject), totals)],
+  ['heatmap', figureHeatmap(perProject, totals, allocation)],
+  ['totals', figureTotalsByProject(reports.totalsByProject(perProject))],
+  ['engagement', figureEngagement(totals, reports.projectsExisting(
+    fixture.projects, months, customer,
+  ))],
+  ['queue', figureQueue(reports.queueMonthly(
+    fixture['openportal-project-usage-reports'],
+    scope.map((row) => row.project_code),
+  ))],
+];
+
+/** Every colour the palette knows, in its light step. */
+const PALETTE = new Set([
+  ...SERIES.map(([pale]) => pale),
+  ...Object.values(CHROME).map(([pale]) => pale),
+]);
+
+describe('every figure', () => {
+  it('builds without throwing, and draws something', () => {
+    for (const [name, figure] of every()) {
+      assert.ok(figure, `${name} produced nothing`);
+      assert.ok(figure.data.length > 0, `${name} has no traces`);
+      assert.ok(figure.layout.title.text, `${name} has no title`);
+    }
+  });
+
+  it('never declares a second y-axis', () => {
+    // The rule the whole design rests on: a figure that could show two measures
+    // offers buttons that rewrite the one axis, so nothing is ever plotted
+    // against a scale it does not belong to.
+    for (const [name, figure] of every()) {
+      assert.equal(figure.layout.yaxis2, undefined, `${name} grew a second y-axis`);
+      for (const trace of figure.data) {
+        assert.notEqual(trace.yaxis, 'y2', `${name} put a trace on y2`);
+      }
+    }
+  });
+
+  it('draws only in colours the theme switch can swap', () => {
+    // The switch works by hex lookup, so a colour outside the palette is a
+    // colour that stays light-mode forever on a dark page.
+    for (const [name, figure] of every()) {
+      for (const trace of figure.data) {
+        for (const colour of [trace.marker?.color, trace.line?.color]) {
+          if (typeof colour === 'string') {
+            assert.ok(PALETTE.has(colour), `${name} uses ${colour}, which is not in the palette`);
+          }
+        }
+      }
+    }
+  });
+
+  it('offers both scales wherever it offers a choice at all', () => {
+    for (const [name, figure] of every()) {
+      const menus = figure.layout.updatemenus ?? [];
+      for (const menu of menus) {
+        assert.ok(menu.buttons.length >= 2, `${name} has a menu with one button`);
+      }
+    }
+  });
+});
+
+describe('the categorical palette', () => {
+  /** Ten projects, which is past the point where hue can tell series apart. */
+  function manyProjects() {
+    return Array.from({ length: 10 }, (_, index) => ({
+      month: '2026-02',
+      project_code: `p${index}`,
+      project_name: `Project ${index}`,
+      customer_name: 'UKRI',
+      node_hours: 100 - index,
+      active_users: 1,
+      entitlement_node_hours: 25804.8,
+      pct_of_entitlement: 1,
+      mean_nodes: 1,
+    }));
+  }
+
+  it('never generates an eighth hue', () => {
+    const banded = reports.rankedBands(manyProjects());
+    const figure = figureProjects(banded, totals.filter((row) => row.month === '2026-02'));
+    const named = figure.data.filter((trace) => trace.name !== 'Other projects');
+    assert.equal(named.length, 7, 'more than seven coloured series');
+    for (const trace of named) {
+      assert.ok(SERIES.some(([pale]) => pale === trace.marker.color));
+    }
+  });
+
+  it('folds the tail into one neutral band, and puts it last', () => {
+    const banded = reports.rankedBands(manyProjects());
+    const figure = figureProjects(banded, totals.filter((row) => row.month === '2026-02'));
+    const last = figure.data[figure.data.length - 1];
+    assert.equal(last.name, 'Other projects');
+    assert.equal(last.marker.color, CHROME.other[0]);
+    // Context, not a series: it must not be carrying a slot that would let the
+    // theme switch treat it as one.
+    assert.deepEqual(last.meta, { chrome: 'other' });
+  });
+
+  it('keeps the tail in the total rather than dropping it', () => {
+    const projects = manyProjects();
+    const banded = reports.rankedBands(projects);
+    const drawn = figureProjects(banded, totals.filter((row) => row.month === '2026-02'))
+      .data.reduce((sum, trace) => sum + trace.y.reduce((a, b) => a + b, 0), 0);
+    const actual = projects.reduce((sum, row) => sum + row.node_hours, 0);
+    assert.equal(drawn, actual);
+  });
+});
+
+describe('the headline figure', () => {
+  it('hatches the month in progress, and only that one', () => {
+    const figure = figureShare(totals, nodes, share, awarded);
+    const pattern = figure.data[0].marker.pattern.shape;
+    assert.deepEqual(pattern, totals.map((row) => (row.is_partial ? '/' : '')));
+    assert.ok(pattern.includes('/'), 'the fixture no longer has a partial month');
+  });
+
+  it('draws the awarded line only when something was actually awarded', () => {
+    const withAwards = figureShare(totals, nodes, share, awarded);
+    assert.ok(withAwards.data.some((trace) => trace.name === 'Awarded to projects'));
+
+    const without = figureShare(totals, nodes, share, months.map(() => 0));
+    assert.ok(!without.data.some((trace) => trace.name === 'Awarded to projects'));
+    // Both views must still line up with the traces they rewrite, or plotly
+    // silently redraws the wrong series.
+    for (const button of without.layout.updatemenus[0].buttons) {
+      assert.equal(button.args[0].y.length, without.data.length);
+    }
+  });
+
+  it('keeps every view button in step with the trace count', () => {
+    const figure = figureShare(totals, nodes, share, awarded);
+    for (const button of figure.layout.updatemenus[0].buttons) {
+      assert.equal(button.args[0].y.length, figure.data.length);
+    }
+  });
+});
+
+describe('the heatmap', () => {
+  it('leaves a project with no usage in a month blank, not at zero', () => {
+    // A blank cell is "held no allocation"; a zero would claim the project was
+    // set up and idle, which is a different and more damning statement.
+    const figure = figureHeatmap(perProject, totals, allocation);
+    assert.ok(figure.data[0].z.flat().includes(null));
+    assert.ok(figure.data[0].text.flat().includes('no allocation'));
+  });
+
+  it('offers the relative view only when some project has an award rate', () => {
+    const withRates = figureHeatmap(perProject, totals, allocation);
+    assert.equal(withRates.layout.updatemenus.length, 1);
+
+    const without = figureHeatmap(perProject, totals, []);
+    assert.deepEqual(without.layout.updatemenus, []);
+  });
+});
+
+describe('the demand figure', () => {
+  it('is absent rather than empty when the portal has no usage reports', () => {
+    assert.equal(figureQueue([]), null);
+  });
+});

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Isambard 3 utilisation</title>
+<link rel="stylesheet" href="report.css">
+<!--
+  plotly is shipped with the extension rather than fetched from a CDN. Two
+  reasons, and either would be enough: an MV3 extension may not load remote
+  script at all, and the version here is the one `plotly.offline.get_plotlyjs()`
+  inlines into the command-line report, so the two render identically.
+-->
+<script src="../vendor/plotly.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="gate" id="gate">
+    <h1>Isambard 3 utilisation</h1>
+    <p class="sub">Reads the Waldur portal API directly and builds the utilisation
+    report in this tab. Nothing is uploaded anywhere; the token is sent to the portal
+    and to nothing else.</p>
+
+    <label for="token">Portal API token</label>
+    <input type="password" id="token" autocomplete="off" spellcheck="false"
+           placeholder="from the portal, under your own account menu">
+    <p class="sub" style="margin-top:6px">Portal tokens expire within hours, not days.</p>
+
+    <div class="row">
+      <div>
+        <label for="api-url">API URL</label>
+        <input type="text" id="api-url" value="https://portal-api.isambard.ac.uk">
+      </div>
+      <div>
+        <label for="nodes">Compute nodes</label>
+        <input type="text" id="nodes" value="384" inputmode="numeric">
+      </div>
+      <div>
+        <label for="share">Our share</label>
+        <input type="text" id="share" value="10%" inputmode="decimal">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="run" type="button">Build the report</button>
+      <label class="check"><input type="checkbox" id="remember">
+        Keep the token until this browser closes</label>
+    </div>
+    <p class="sub" id="cache-note"></p>
+    <div id="gate-error"></div>
+  </div>
+
+  <div id="report" hidden>
+    <div id="head"></div>
+    <div class="controls" id="controls" hidden>
+      <label for="customer">Organisation</label>
+      <select id="customer"></select>
+      <span id="reconcile-badge"></span>
+      <span style="flex:1"></span>
+      <button type="button" id="refresh"
+              title="Refetches the month in progress and rechecks the history against the
+                     portal's own row counts. Complete months come from the cache unless
+                     that check says they have changed.">Refresh</button>
+      <button type="button" id="forget"
+              title="Removes the cached months and the remembered token from this browser.">
+        Clear cached data</button>
+    </div>
+    <div class="progress" id="progress" hidden>
+      <span id="progress-text"></span>
+      <div class="bar"><span id="progress-bar"></span></div>
+    </div>
+    <div id="errors"></div>
+    <div class="kpis" id="tiles"></div>
+    <div id="figures"></div>
+    <div id="method"></div>
+  </div>
+
+</div>
+<script type="module" src="report.js"></script>
+</body>
+</html>

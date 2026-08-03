@@ -258,6 +258,27 @@ def test_the_headline_still_renders_without_awards(snapshot):
         assert len(button.args[0]["y"]) == len(figure.data)
 
 
+def test_the_headline_omits_the_awards_argument_entirely(snapshot):
+    """The call README documents, and the one nothing else here makes.
+
+    Passing an explicit list of zeros is not the same code path as leaving the
+    argument out: the default used to become an empty list, which the strict
+    zip against a full month column rejected outright.
+    """
+    totals = reports.monthly_totals(snapshot, customer="UKRI")
+    figure = viz.figure_share(totals, nodes=384, share=0.10)
+    assert "Awarded to projects" not in [trace.name for trace in figure.data]
+    for button in figure.layout.updatemenus[0].buttons:
+        assert len(button.args[0]["y"]) == len(figure.data)
+
+
+def test_the_headline_rejects_an_awards_list_of_the_wrong_length(snapshot):
+    """The strict zip still has to catch a caller who does pass one, wrongly."""
+    totals = reports.monthly_totals(snapshot, customer="UKRI")
+    with pytest.raises(ValueError):
+        viz.figure_share(totals, 384, 0.10, [0.0] * (totals.height + 1))
+
+
 def test_credit_position_reads_the_customer_level_fields(snapshot):
     """The only organisation-level quantities the portal carries.
 

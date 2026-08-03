@@ -29,3 +29,13 @@ data/
 # Generated reports. `viz` inlines real project names, usage and credit
 # balances into the page, so a built report is data, not source.
 *.html
+# The extension's page is source and contains no data at all: it is empty
+# markup that fills itself from the API at view time.
+!web/src/report.html
+
+# The plotly bundle the extension loads, written by `pixi run web-vendor` out
+# of the same `plotly.offline.get_plotlyjs()` the command-line report inlines.
+# Five megabytes of somebody else's code, reproducible in one command, and
+# pinned to whatever the Python environment resolves -- so the two reports
+# cannot drift onto different plotly versions.
+web/vendor/

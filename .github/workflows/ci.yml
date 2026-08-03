@@ -27,3 +27,10 @@ jobs:
 
       - name: Test
         run: pixi run pytest --cov=waldur_tools --cov-report=term-missing
+
+      # Runs after the suite above, which is what regenerates the golden files
+      # the parity test reads -- and which fails first if they were left
+      # uncommitted. `pixi run test-web` would re-run pytest for that reason, so
+      # the runner is invoked directly here.
+      - name: Web tests
+        run: pixi run node --test 'web/tests/*.test.mjs'

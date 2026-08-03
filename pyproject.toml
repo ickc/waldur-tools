@@ -54,6 +54,10 @@ platforms = ["linux-aarch64", "linux-64", "osx-arm64"]
 
 [tool.pixi.dependencies]
 python = ">=3.11,<3.14"
+# Only to run web/tests/parity.test.mjs, which checks the browser extension's
+# arithmetic against this package's. The extension itself has no build step and
+# no node dependencies -- it is loaded from source.
+nodejs = ">=20"
 
 [tool.pixi.pypi-dependencies]
 waldur-tools = { path = ".", editable = true }
@@ -74,7 +78,16 @@ test = "pytest"
 lint = "ruff check src tests"
 fmt = "ruff format src tests"
 typecheck = "mypy src"
-check = { depends-on = ["lint", "typecheck", "test"] }
+
+# The browser extension. `web-vendor` writes the plotly bundle it loads, out of
+# the same `get_plotlyjs()` the command-line report inlines, so the two cannot
+# end up on different plotly versions. `test-web` checks the extension's
+# arithmetic against this package's, and must run after `test`, which is what
+# regenerates the golden files it reads.
+web-vendor = { cmd = "python scripts/vendor_plotly.py" }
+test-web = { cmd = "node --test 'web/tests/*.test.mjs'", depends-on = ["test"] }
+
+check = { depends-on = ["lint", "typecheck", "test", "test-web"] }
 
 # --------------------------------------------------------------------------
 # tooling

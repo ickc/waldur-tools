@@ -821,3 +821,36 @@ scales are offered, table views exist, and every palette colour has a dark step.
 assertion in this file — the markup was correct and the JavaScript threw no
 error, the figures simply never drew. If you change how the page is assembled,
 open it, or screenshot it headlessly, before believing the suite.
+
+### The browser extension, and why it cannot drift
+
+`web/` reimplements a subset of `reports.py` in JavaScript, because a browser
+cannot run this package. Two implementations of the same arithmetic drift, and
+the drift is silent — nothing about a wrong `mean_monthly_allocation` looks
+wrong on a chart — so they are pinned to each other with a golden fixture.
+
+`tests/test_web_parity.py` runs the Python reports over the same
+`tests/conftest.py` fixtures everything else uses, and writes two committed
+files: `web/tests/fixture.json`, the inputs in the shape the API returns them,
+and `web/tests/expected.json`, what the Python makes of them.
+`web/tests/parity.test.mjs` runs the JavaScript over that fixture and asserts it
+lands on the same numbers, comparing rows as multisets and checking separately
+the three orderings a figure reads straight off an axis.
+
+**The Python is the definition.** Change a formula in `reports.py` and the
+pytest rewrites `expected.json` *and fails*, so the new expectations end up in
+the working tree — where the node test immediately says which parts of the
+JavaScript have not followed — and cannot reach main uncommitted. Both halves
+run in CI, and `pixi run check` runs both.
+
+What is deliberately **not** pinned is presentation: `viz.py` and
+`web/src/figures.js` are two renderings of the same series and are allowed to
+differ. What may not differ is any number either of them draws. A third test in
+that file guards the guard, asserting the fixture still exercises a partial
+month, a filtered-out organisation, a project with no usable award rate and a
+blanked association row — a golden file over trivial data proves nothing.
+
+The same warning as above applies with more force: none of this opens a browser.
+The parity test covers the arithmetic and nothing else, so a change to the
+fetch order, the progressive render or the figure builders needs the extension
+loaded and looked at.
