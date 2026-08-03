@@ -142,6 +142,41 @@ describe('reading', () => {
     );
   });
 
+  it('checks a plain list against the server’s own count too', async () => {
+    portal(usageRows(450), { corrupt: (page) => page.slice(0, -3) });
+    await assert.rejects(
+      () => client().list(ENDPOINT, { pageSize: 200 }),
+      (error) => error instanceof WaldurError && /Pagination is unstable/.test(error.message),
+    );
+  });
+
+  it('catches a repeated row in a plain list, which the count cannot', async () => {
+    // Measured on the live deployment, `openportal-associations` does exactly
+    // this: the count matches every time while a row comes back twice and
+    // another never arrives, and how many varies with `page_size`. Nothing
+    // server-side fixes it -- `o=` and `ordering=` are ignored as silently as
+    // any other unrecognised parameter -- so it has to be caught here.
+    portal(usageRows(10), { corrupt: (page) => [...page.slice(0, -1), page[0]] });
+    await assert.rejects(
+      () => client().list(ENDPOINT, { rowKeys: ['username'] }),
+      (error) => /rows repeat a key already seen/.test(error.message),
+    );
+  });
+
+  it('reports the repeat instead of raising when the caller asks it to', async () => {
+    // For the one denominator on one tile that is better slightly short than
+    // absent. The rows still come back; the caller is told how many are wrong.
+    portal(usageRows(10), { corrupt: (page) => [...page.slice(0, -1), page[0]] });
+    const seen = [];
+    const rows = await client().list(ENDPOINT, {
+      rowKeys: ['username'],
+      onRepeats: (report) => seen.push(report),
+    });
+    assert.equal(rows.length, 10);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].repeats, 1);
+  });
+
   it('says what a rejected token means, since that is nearly always why', async () => {
     globalThis.fetch = async () => reply({ detail: 'nope' }, { status: 401 });
     await assert.rejects(
@@ -189,6 +224,22 @@ describe('pulling one month', () => {
     await assert.rejects(
       () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200 }),
       (error) => /rows repeat a key already seen/.test(error.message),
+    );
+  });
+
+  it('refuses to read a missing X-Result-Count as an empty month', async () => {
+    // The header is readable from a browser only while the deployment lists it
+    // in `access-control-expose-headers`. Without this check `count()` answers
+    // null, `if (!expected)` reads null as zero, and every month "succeeds"
+    // empty -- a whole report drawn from no rows and no error anywhere.
+    globalThis.fetch = async (target) => reply([], { url: String(target) });
+    await assert.rejects(
+      () => pullMonth(client(), ENDPOINT, 2026, 2),
+      (error) => error instanceof WaldurError && /X-Result-Count/.test(error.message),
+    );
+    await assert.rejects(
+      () => pullByMonth(client(), ENDPOINT, { today: new Date(2026, 1, 15) }),
+      (error) => error instanceof WaldurError && /X-Result-Count/.test(error.message),
     );
   });
 

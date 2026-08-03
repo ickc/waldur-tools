@@ -29,7 +29,9 @@ import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
   figureTotalsByProject, format,
 } from './figures.js';
-import { PROSE, esc, intro, method, section, tableView, tile } from './page.js';
+import {
+  PROSE, esc, intro, method, reconcileTable, section, tableView, tile,
+} from './page.js';
 import { currentTheme, preferredTheme, setTheme } from './palette.js';
 import * as reports from './reports.js';
 
@@ -51,6 +53,8 @@ const state = {
     invoices: [],
     usageReports: [],
     associations: null,
+    /** Rows the associations pull handed back twice; see `loadExtras`. */
+    associationRepeats: 0,
   },
   /** Keyed by month, because a month can be delivered twice on a cache retry. */
   usageByMonth: new Map(),
@@ -212,7 +216,10 @@ function render() {
           : `${latest.active_users} / ${reports.peopleWithAccess(state.raw.associations, codes)}`,
         state.raw.associations === null
           ? 'ran something in the last complete month'
-          : 'of everyone with access ran something',
+          : state.raw.associationRepeats
+            ? 'of everyone with access ran something — the portal paged that list ' +
+              'inconsistently, so the denominator is short by a row or two'
+            : 'of everyone with access ran something',
       ),
     );
   }
@@ -298,24 +305,25 @@ function table(id, rows, columns) {
  */
 function renderReconcile(rows, invoices, customer) {
   const badge = el('reconcile-badge');
+  const detail = el('reconcile');
   if (!invoices.length) {
     badge.innerHTML = '<span class="badge">invoices not loaded</span>';
+    detail.innerHTML = '';
     return;
   }
   const checked = reports.reconcile(rows, invoices, { customer, asOf: state.asOf });
   const bad = checked.filter((row) => row.status !== 'ok' && row.status !== 'no invoice');
-  if (!bad.length) {
-    badge.innerHTML =
-      `<span class="badge ok" title="Usage agrees with incurred_costs in every ` +
-      `invoiced month">usage reconciles with ${checked.length} months of invoices</span>`;
-    return;
-  }
-  const detail = bad
-    .map((row) => `${reports.monthLabel(row.month)}: ${row.status}`)
-    .join(', ');
-  badge.innerHTML =
-    `<span class="badge warn" title="${esc(detail)}">${bad.length} month` +
-    `${bad.length === 1 ? '' : 's'} do not reconcile — suspect the pull</span>`;
+  // The table goes up either way. When it reconciles it is the evidence for the
+  // badge; when it does not, it is the only thing that says which months and by
+  // how much -- and telling a known accounting quirk from an unstable pull is
+  // exactly the judgement the badge cannot make for the reader.
+  detail.innerHTML = reconcileTable(checked);
+  badge.innerHTML = bad.length
+    ? `<span class="badge warn" title="${esc(
+      bad.map((row) => `${reports.monthLabel(row.month)}: ${row.status}`).join(', '),
+    )}">${bad.length} month${bad.length === 1 ? '' : 's'} do not reconcile — see below</span>`
+    : `<span class="badge ok" title="Usage agrees with incurred_costs in every invoiced ` +
+      `month">usage reconciles with ${checked.length} months of invoices</span>`;
 }
 
 function showError(heading, error) {
@@ -402,11 +410,25 @@ async function run({ refresh = false } = {}) {
  * figure; `openportal-associations` is thousands of rows across the whole
  * machine and backs one denominator on one tile. Both are worth having and
  * neither is worth waiting for.
+ *
+ * Associations is pulled with a duplicate check, because measured against the
+ * live deployment it is *also* not totally ordered: the row count matches every
+ * time while a row or two comes back twice and as many never arrive, and the
+ * number varies with `page_size`. Unlike the usage table there is nothing to
+ * slice it by and no ordering parameter this deployment honours, so the repeat
+ * is noted rather than raised: it moves one denominator on one tile by a row or
+ * two, and losing the whole tile over that would be the worse trade. The tile
+ * says so itself when it happens.
  */
 async function loadExtras() {
   state.raw.usageReports = await state.client.list('openportal-project-usage-reports');
   scheduleRender();
-  state.raw.associations = await state.client.list('openportal-associations');
+  state.raw.associations = await state.client.list('openportal-associations', {
+    rowKeys: ['uuid'],
+    onRepeats: ({ repeats }) => {
+      state.raw.associationRepeats = repeats;
+    },
+  });
   scheduleRender();
 }
 
