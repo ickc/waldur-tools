@@ -776,9 +776,50 @@ another was returned not at all; keeping one of each would leave a snapshot
 that looks clean and still under-reports. The fix is to pull again, not to
 tidy up after.
 
-Other endpoints do not need this — `openportal-associations` pages all its
-rows cleanly — and the cost is one extra count request per month, so the list
-stays as short as the evidence supports.
+### `openportal-associations` is not clean either
+
+This section used to say that it was. It is not: paged end to end against the
+live deployment, **the row count agrees on every attempt while a row or two
+comes back twice and as many never arrive**, and how many depends on
+`page_size` — which is what marks it a paging artefact rather than duplicate
+data. It is the same fault as the usage table, three orders of magnitude
+smaller, and the count check cannot see it for the same reason.
+
+There is no fix of the usual shape available. The endpoint has no time axis to
+slice on, and this deployment ignores `o=` and `ordering=` exactly as silently
+as it ignores any other parameter it does not recognise — so the ordering
+cannot be made total from the client side at all.
+
+The browser extension therefore detects rather than prevents: `api.js`'s
+`list()` takes an optional `rowKeys`, a repeat raises by default, and the
+associations pull is the one caller that opts out via `onRepeats`, because the
+error moves one denominator on one tile by a row or two and losing the tile
+would be the worse trade. The tile says so on the page when it happens.
+
+**The Python side is still exposed.** `cache.ROW_KEYS` names only the usage
+endpoint, so `snapshot` pulls associations through plain `iter_list` with the
+count check alone, and the count always agrees. Adding `openportal-associations:
+("uuid",)` to `ROW_KEYS` would surface it — but `check()` raises, so every
+snapshot would then fail on an endpoint that is a row or two short out of
+thousands, which is a policy decision rather than an obvious fix. Left as it
+is, and written down here rather than forgotten.
+
+### What the deployment does and does not honour
+
+Measured directly, because every one of these fails silently and none of them
+is documented:
+
+| Parameter | Behaviour |
+| --- | --- |
+| `page_size` | Honoured up to **300**; above that, 300 comes back with no error |
+| `field=` | **Ignored** — every column is returned whatever is asked for |
+| `o=`, `ordering=` | **Ignored** — the ordering cannot be changed from here |
+| unrecognised filters | **Ignored**, with the full unfiltered `X-Result-Count` |
+
+The cap being 300 rather than 1000 is why `DEFAULT_PAGE_SIZE` stays at 200 in
+both implementations: the saving is about a third of the requests, not five
+sixths, and having the two tools page identically is worth more than that — a
+discrepancy between them is then never the page size.
 
 This deployment publishes **no OpenAPI schema** (`/api/schema/`, `/api-docs/`
 and friends all 404), so the generated client cannot be regenerated against it.
@@ -854,3 +895,13 @@ The same warning as above applies with more force: none of this opens a browser.
 The parity test covers the arithmetic and nothing else, so a change to the
 fetch order, the progressive render or the figure builders needs the extension
 loaded and looked at.
+
+That is not a hypothetical. The first time the extension was loaded and looked
+at, the view buttons were drawing straight over the figure titles — three
+things wanting the same strip above the plot: plotly's modebar, the button row
+and a centred title. Every assertion in `figures.test.mjs` passed throughout,
+because the figure *specification* was right and only the geometry was wrong,
+and no amount of checking a spec object catches a title that renders as
+"…month by mon|". It is now pinned left in container coordinates with a top
+margin deep enough for two bands, and there is a test for that — but the test
+was written after the browser found it, which is the point.

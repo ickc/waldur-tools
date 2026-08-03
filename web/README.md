@@ -66,7 +66,11 @@ One thing it adds: the **invoice cross-check runs on the page**. `waldur-tools`
 asks you to run `report reconcile` before quoting anything out of the visual
 report, and nobody reading a web page is going to. It is one cheap endpoint and
 the same arithmetic, so the badge beside the organisation picker says whether
-the node hours in these figures agree with what the portal billed.
+the node hours in these figures agree with what the portal billed — and the
+table under it says *which months and by how much*, because a summary cannot
+tell a known accounting quirk from an unstable pull and the reader usually
+can. Every month is listed, agreeing ones included: a gap with nothing beside
+it has no scale to be read against.
 
 ## How it stays fast
 
@@ -93,18 +97,48 @@ Because the usage endpoint is **not** scoped to an organisation, changing the
 organisation, the node count or the share re-renders from rows already in hand
 and costs no request at all.
 
-### Two things worth measuring
+### Two things worth measuring, measured
 
-Neither changes the design, only the speed, and both need a live token:
+Both were open questions about speed rather than about the design. Both have
+now been put to the live deployment, and neither changed it:
 
-- **Does `page_size` go above 200?** At 200 the usage pull is around 155 pages.
-  If the deployment accepts 1000 it is nearer 30.
-- **Does `?field=` work?** The usage rows carry `full_name`, `allocation`, `user`
-  and `username` where four columns would do, and the pull is the better part of
-  ten megabytes of JSON. Unlike a filter, field selection is safe to verify — you
-  can see whether the returned keys shrank. Beware that Waldur's DRF filters
-  **silently ignore parameters they do not recognise**, so anything that looks
-  like a filter must be checked against `X-Result-Count`, never assumed.
+- **`page_size` is capped at 300.** Ask for 1000 or 5000 and 300 comes back,
+  with no error and no indication that the request was trimmed — the same
+  silence every other unrecognised parameter gets. So the ceiling is real but
+  modest: raising the page size from 200 buys about a third fewer requests, not
+  the five-fold cut a cap of 1000 would have. `DEFAULT_PAGE_SIZE` stays at 200,
+  which is what the Python client uses, so the two tools page identically and a
+  discrepancy between them is never the page size.
+- **`?field=` does not work.** The usage rows come back carrying every column —
+  `full_name`, `username`, `allocation`, `user` and the rest — whatever is asked
+  for. The parameter is dropped like any other the filter backend does not know,
+  so there is no payload to save here. `o=` and `ordering=` go the same way,
+  which matters more than the size of the response: **the ordering cannot be
+  made total from the client side**, and that is why slicing by month is the
+  only fix available for the usage table.
+
+The measurement itself is the lesson. Waldur's DRF filters **silently ignore
+parameters they do not recognise**, so `page_size=1000` returning 300 rows and
+`field=allocation` returning every field are both indistinguishable from
+success unless you look at what came back. Nothing that looks like a filter may
+be assumed to have applied; it has to be checked against `X-Result-Count` or
+against the keys on a row.
+
+### Associations is not totally ordered either
+
+`openportal-associations` backs the "people with access" denominator on one
+tile, and it is pulled straight through because it has no time axis to slice
+on. Against the live deployment it turns out to page as badly as the usage
+table does, only in miniature: **the row count agrees on every attempt while a
+row or two comes back twice and as many never arrive**, and how many varies
+with `page_size` — which is what makes it a paging artefact and not duplicate
+data. `o=` and `ordering=` being ignored means there is nothing to reach for.
+
+So `list()` takes an optional `rowKeys`, and a repeat is fatal by default. The
+associations pull is the one caller that opts out of that, via `onRepeats`: the
+error moves one denominator on one tile by a row or two, and losing the tile
+over it would be the worse trade. **The tile says so itself when it happens**,
+rather than quietly showing a number that is one short.
 
 ## The paging guards are not optional
 
@@ -120,7 +154,13 @@ hours well past the true figure and read as a finding until it was checked.
 - a per-month row count checked against `X-Result-Count` for that same filter;
 - a duplicate check on `(allocation, user, year, month)`, because duplicates and
   omissions cancel out in a count;
-- the months summing to the unfiltered total for the table as a whole.
+- the months summing to the unfiltered total for the table as a whole;
+- and `X-Result-Count` being *readable at all*. Every guard above is arithmetic
+  against that header, and it crosses an origin only while the deployment names
+  it in `access-control-expose-headers`. Were it to stop doing so, `count()`
+  would answer null, null would read as an empty month, and the report would
+  draw itself out of no rows without an error anywhere. So a missing header is
+  an error in its own right.
 
 The last of those doubles as the cache's staleness check: if the portal backfills
 an old month, the totals stop agreeing, the cache is dropped and the pull runs
