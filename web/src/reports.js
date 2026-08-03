@@ -321,7 +321,7 @@ export function monthlyTotals(rows, { nodes = TOTAL_NODES, share = DEFAULT_SHARE
  */
 export function monthly(rows, { nodes = TOTAL_NODES, share = DEFAULT_SHARE } = {}) {
   const out = [];
-  for (const [, bucket] of groupBy(rows, (row) => `${row.month} ${row.project_code}`)) {
+  for (const [, bucket] of groupBy(rows, (row) => `${row.month}\u0000${row.project_code}`)) {
     const first = bucket[0];
     const nodeHours = sumOf(bucket, 'node_usage');
     const worth = entitlement(first.month, nodes, share);
