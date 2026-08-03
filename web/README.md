@@ -230,7 +230,7 @@ cached data* removes both the token and the cached months.
 ## Tests
 
 ```bash
-pixi run test-web       # runs pytest first, then all three files below
+pixi run test-web       # runs pytest first, then all five files below
 ```
 
 **`tests/parity.test.mjs` — the numbers.** `src/reports.js` is a second
