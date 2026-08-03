@@ -149,3 +149,14 @@ th { color: var(--ink); font-weight: 600; }
 .stale { color: var(--muted); font-size: .85rem; }
 
 @media (max-width: 640px) { .tile.hero .value { font-size: 2.2rem; } }
+
+/* The invoice cross-check table. Flagged months are marked twice over -- a tint
+   and a word -- because several series colours on this page already sit below
+   3:1 contrast and colour alone is not an accessible signal. */
+details.reconcile { margin: 4px 0 24px; border-top: none; padding-top: 0; }
+details.reconcile > summary { font-size: .95rem; color: var(--ink); font-weight: 600; }
+details.reconcile p.sub { margin-top: 8px; }
+details.reconcile td.na { color: var(--muted); }
+details.reconcile td.bad { color: var(--critical); font-weight: 600; }
+details.reconcile td.good { color: var(--muted); }
+details.reconcile tr.flagged { background: color-mix(in srgb, var(--critical) 8%, transparent); }

@@ -52,6 +52,66 @@ export function tableView(rows, columns) {
   );
 }
 
+/**
+ * The invoice cross-check, month by month, under the badge.
+ *
+ * The badge alone says *whether* the pull reconciles, which is enough to stop
+ * someone quoting a bad headline and not enough to do anything about it. Two
+ * months that disagree are either an unstable pull or a known accounting
+ * quirk, and those look identical from a summary -- so the arithmetic is put
+ * on the page: both routes to the same node hours, their difference, and the
+ * state of the invoice behind it.
+ *
+ * Every month is listed, not just the failures. A reader checking a
+ * disagreement against what they already know needs the agreeing months beside
+ * it, or there is no scale to read the gap against.
+ *
+ * Open by default when something disagrees, closed when nothing does.
+ */
+export function reconcileTable(rows) {
+  if (!rows.length) return '';
+  const bad = rows.filter((row) => row.status !== 'ok' && row.status !== 'no invoice');
+  const cell = (value, digits = 1) =>
+    value === null || value === undefined ? '<td class="na">—</td>' : `<td>${format(value, digits)}</td>`;
+
+  const body = rows
+    .map((row) => {
+      const flagged = row.status !== 'ok' && row.status !== 'no invoice';
+      const sign = row.pct_difference !== null && row.pct_difference > 0 ? '+' : '';
+      return (
+        `<tr class="${flagged ? 'flagged' : ''}">` +
+        `<td>${esc(monthLabel(row.month))}${row.is_partial ? ' <em>(partial)</em>' : ''}</td>` +
+        cell(row.node_hours) +
+        cell(row.incurred_costs) +
+        cell(row.difference) +
+        (row.pct_difference === null
+          ? '<td class="na">—</td>'
+          : `<td>${sign}${format(row.pct_difference, 1)}%</td>`) +
+        `<td>${esc(row.invoice_state ?? '—')}</td>` +
+        `<td class="${flagged ? 'bad' : 'good'}">${esc(row.status)}</td>` +
+        '</tr>'
+      );
+    })
+    .join('');
+
+  return (
+    `<details class="reconcile"${bad.length ? ' open' : ''}>` +
+    `<summary>Invoice cross-check, month by month${
+      bad.length ? ` — ${bad.length} month${bad.length === 1 ? '' : 's'} disagree` : ''
+    }</summary>` +
+    '<p class="sub">Node hours summed from <code>openportal-allocation-user-usage</code> ' +
+    'beside <code>incurred_costs</code> on the invoice for the same month — two routes to ' +
+    'the same figure, aggregated by different sides of the portal. A positive difference ' +
+    'is usage nobody billed, which is the shape a duplicated page takes; a negative one ' +
+    'is billing with no usage behind it, which is not something paging can cause. ' +
+    'The month in progress is expected to disagree and is marked partial.</p>' +
+    '<div class="tablewrap"><table><thead><tr>' +
+    '<th>Month</th><th>Node hours used</th><th>Invoiced</th><th>Difference</th>' +
+    '<th>%</th><th>Invoice state</th><th>Status</th>' +
+    `</tr></thead><tbody>${body}</tbody></table></div></details>`
+  );
+}
+
 export function tile(label, value, note, hero = false) {
   return (
     `<div class="tile${hero ? ' hero' : ''}">` +
