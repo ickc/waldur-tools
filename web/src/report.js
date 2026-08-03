@@ -1,6 +1,13 @@
 /**
  * The report, assembled live in the tab.
  *
+ * **It starts on its own.** The reader was on their organisation's dashboard
+ * when they pressed the button, and `background.js` read the token, the API URL
+ * and the organisation UUID out of that tab and handed them over. Nothing is
+ * asked for; the gate in `report.html` appears only when one of those readings
+ * failed, and says which. See `portal.js` for what is read and how far each
+ * reading can be trusted.
+ *
  * The order things happen in is the whole design. A snapshot-backed report can
  * compute everything and then draw; this one has a reader watching, so it draws
  * as early as it honestly can:
@@ -33,6 +40,7 @@ import {
   PROSE, esc, intro, method, reconcileTable, section, tableView, tile,
 } from './page.js';
 import { currentTheme, preferredTheme, setTheme } from './palette.js';
+import { customerFromPermissions } from './portal.js';
 import * as reports from './reports.js';
 
 const USAGE = 'openportal-allocation-user-usage';
@@ -52,13 +60,29 @@ const state = {
     projects: [],
     invoices: [],
     usageReports: [],
+    /** `users/me/`: the token's own account, for the organisation it belongs to. */
+    me: null,
     associations: null,
     /** Rows the associations pull handed back twice; see `loadExtras`. */
     associationRepeats: 0,
   },
   /** Keyed by month, because a month can be delivered twice on a cache retry. */
   usageByMonth: new Map(),
-  options: { nodes: 384, share: 0.1, customer: null },
+  options: { nodes: reports.TOTAL_NODES, share: reports.DEFAULT_SHARE, customer: null },
+  /**
+   * The organisation the portal tab was showing, as a UUID.
+   *
+   * Held rather than resolved immediately because the name it maps to arrives
+   * with the `customers` endpoint, in the first wave of the pull. A UUID is the
+   * right thing to carry: it is what the portal URL states, it is stable across
+   * a rename, and it belongs to whichever institution the reader came from --
+   * which is the whole reason no organisation is named in this source.
+   */
+  customerUuid: null,
+  /** The organisation name the portal tab remembered, when it offered no UUID. */
+  customerName: null,
+  /** Whether the token came from the portal tab, and so can be re-read. */
+  tokenFromPortal: false,
   loading: false,
   headRendered: false,
   sections: new Set(),
@@ -358,20 +382,25 @@ async function run({ refresh = false } = {}) {
 
   // Swapped before the first request rather than after it, so the progress line
   // below is somewhere the reader can see while it is the only thing happening.
+  el('starting').hidden = true;
   el('gate').hidden = true;
   el('report').hidden = false;
   progress('Reading allocations, credits and invoices…', 0, 1);
 
-  // Five small endpoints, all at once: about a hundred rows between them, and
-  // everything the header and the credit tiles need.
-  const [allocations, summary, customers, projects, invoices] = await Promise.all([
+  // Six small endpoints, all at once: about a hundred rows between them, and
+  // everything the header and the credit tiles need. `users/me/` is the odd one
+  // out -- a single record, not a list, and it is here for the organisation the
+  // token belongs to, which is the fallback when the portal tab's URL named
+  // none.
+  const [allocations, summary, customers, projects, invoices, me] = await Promise.all([
     state.client.list('openportal-allocations'),
     state.client.list('openportal-accounting-summary'),
     state.client.list('customers'),
     state.client.list('projects'),
     state.client.list('invoices'),
+    state.client.record('users/me'),
   ]);
-  Object.assign(state.raw, { allocations, summary, customers, projects, invoices });
+  Object.assign(state.raw, { allocations, summary, customers, projects, invoices, me });
 
   populateCustomers(allocations);
   el('controls').hidden = false;
@@ -437,8 +466,8 @@ async function loadExtras() {
  *
  * The portal is multi-tenant and one token often administers projects belonging
  * to several separately funded organisations; counting them together overstates
- * any one of them. The default matches the command-line tool, and falls back to
- * whichever organisation holds the most projects when that one is not visible.
+ * any one of them. The picker is therefore never removed -- but it should open
+ * on the right one, and working out which is `defaultCustomer` below.
  */
 function populateCustomers(allocations) {
   const select = el('customer');
@@ -455,12 +484,42 @@ function populateCustomers(allocations) {
     .join('');
 
   if (state.options.customer === null) {
-    const names = found.map((row) => row.name);
-    state.options.customer = names.includes(reports.DEFAULT_CUSTOMER)
-      ? reports.DEFAULT_CUSTOMER
-      : (names[0] ?? null);
+    state.options.customer = defaultCustomer(found.map((row) => row.name));
   }
   select.value = state.options.customer ?? '';
+}
+
+/**
+ * Whose report this is, in the order the evidence is worth believing.
+ *
+ * This is what replaced an institution's name written into the source. Nothing
+ * below names one, so an RSE at any institution opens their own dashboard,
+ * presses the button, and gets their own figures -- which is the point, and is
+ * also why none of these routes can be tested from a single organisation's
+ * account.
+ *
+ * 1. **The organisation UUID from the portal tab's URL**, resolved through the
+ *    `customers` rows already in hand. It is where the reader was looking, so
+ *    it is what they meant.
+ * 2. **The organisation their token belongs to**, from the `customer`-scoped
+ *    entry in `users/me/`'s permissions. Works from any portal page at all,
+ *    including one with no UUID in it.
+ * 3. **Whichever organisation holds the most projects** in scope. A guess, and
+ *    the picker is right there.
+ *
+ * A name that resolves to no organisation *in scope* is dropped rather than
+ * used: scoping to an organisation whose projects this token cannot see would
+ * draw an empty report and blame the reader for it.
+ */
+function defaultCustomer(namesInScope) {
+  const byUuid = state.customerUuid
+    ? state.raw.customers.find((row) => row.uuid === state.customerUuid)?.name
+    : null;
+  const candidates = [byUuid, state.customerName, customerFromPermissions(state.raw.me)];
+  for (const candidate of candidates) {
+    if (candidate && namesInScope.includes(candidate)) return candidate;
+  }
+  return namesInScope[0] ?? null;
 }
 
 async function showCacheNote() {
@@ -542,15 +601,74 @@ async function grantHost(apiUrl) {
   }
 }
 
+/**
+ * Ask the background worker for whatever it read off the portal tab.
+ *
+ * Null when there was no portal tab, when the page would not be scripted, or
+ * when this is not running as an extension at all -- and all three mean the
+ * same thing downstream: show the form.
+ */
+async function handover() {
+  try {
+    return await chrome.runtime.sendMessage({ type: 'context' });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A fresh token from the portal tab, for `WaldurClient` to retry a 401 with.
+ *
+ * Only wired up when the token came from the portal in the first place. A
+ * pasted token has no source to go back to, and silently replacing it with one
+ * belonging to a different account would be worse than the error.
+ */
+async function renewFromPortal() {
+  try {
+    return await chrome.runtime.sendMessage({ type: 'refresh' });
+  } catch {
+    return null;
+  }
+}
+
+/** Build the report from a token and an API URL, whatever their provenance. */
+async function build({ token, apiUrl, fromPortal }) {
+  state.apiUrl = apiUrl;
+  state.tokenFromPortal = fromPortal;
+  state.client = new WaldurClient({
+    apiUrl,
+    token,
+    renew: fromPortal ? renewFromPortal : null,
+  });
+  state.cache = new MonthCache(apiUrl);
+
+  el('starting').hidden = true;
+  el('gate').hidden = true;
+  el('run').disabled = true;
+  el('gate-error').innerHTML = '';
+  try {
+    await run();
+  } catch (error) {
+    state.loading = false;
+    progress(null);
+    if (el('report').hidden) showGate(error.message);
+    else {
+      showError(
+        error instanceof WaldurError ? 'The portal pull did not complete' : 'Something broke',
+        error,
+      );
+    }
+  } finally {
+    el('run').disabled = false;
+  }
+}
+
+/** The pasted-token path: the fallback, reached from the gate's own button. */
 async function start() {
   const token = el('token').value.trim();
   const apiUrl = el('api-url').value.trim();
-  const nodes = Number(el('nodes').value);
-  const share = parseShare(el('share').value);
 
   if (!token) return gateError('Paste a portal API token to continue.');
-  if (!Number.isFinite(nodes) || nodes <= 0) return gateError('Node count must be a number.');
-  if (share === null) return gateError('Share must be a percentage, like 10%.');
 
   // The manifest grants the Isambard portal outright; any other deployment has
   // to be asked for, and asking has to happen inside the click that triggered
@@ -561,33 +679,25 @@ async function start() {
     );
   }
 
-  state.options.nodes = nodes;
-  state.options.share = share;
-  state.apiUrl = apiUrl;
-  state.client = new WaldurClient({ apiUrl, token });
-  state.cache = new MonthCache(apiUrl);
-
   if (el('remember').checked) await session.set(token);
   else await session.clear();
 
-  el('run').disabled = true;
-  el('gate-error').innerHTML = '';
-  try {
-    await run();
-  } catch (error) {
-    state.loading = false;
-    progress(null);
-    if (el('report').hidden) gateError(error.message);
-    else {
-      showError(
-        error instanceof WaldurError ? 'The portal pull did not complete' : 'Something broke',
-        error,
-      );
-    }
-  } finally {
-    el('run').disabled = false;
-  }
+  await build({ token, apiUrl, fromPortal: false });
   return undefined;
+}
+
+/**
+ * Fall back to the form, saying what failed rather than just appearing.
+ *
+ * A form the reader did not expect is a form they have to guess the reason for,
+ * and every reason here is knowable: no portal tab open, a token the portal
+ * would not accept, a page that could not be read. Say which.
+ */
+function showGate(why) {
+  el('starting').hidden = true;
+  el('gate').hidden = false;
+  if (why) el('gate-why').textContent = why;
+  if (state.apiUrl) el('api-url').value = state.apiUrl;
 }
 
 function gateError(message) {
@@ -605,6 +715,30 @@ el('customer').addEventListener('change', (event) => {
   // already in hand and only the filter over them changes.
   state.options.customer = event.target.value || null;
   clearError();
+  scheduleRender();
+});
+
+// Likewise free, and for the same reason: the machine's size and this
+// organisation's share of it are denominators applied at render time, not
+// filters applied at fetch time. Nothing here refetches anything.
+el('nodes').addEventListener('change', () => {
+  const nodes = Number(el('nodes').value);
+  if (!Number.isFinite(nodes) || nodes <= 0) {
+    el('nodes').value = String(state.options.nodes);
+    return;
+  }
+  state.options.nodes = nodes;
+  scheduleRender();
+});
+
+el('share').addEventListener('change', () => {
+  const share = parseShare(el('share').value);
+  if (share === null) {
+    el('share').value = `${(state.options.share * 100).toFixed(0)}%`;
+    return;
+  }
+  state.options.share = share;
+  el('share').value = `${(share * 100).toFixed(share * 100 % 1 ? 1 : 0)}%`;
   scheduleRender();
 });
 
@@ -640,7 +774,9 @@ document.documentElement.setAttribute('data-theme', preferredTheme());
 // The bundle is written by `pixi run web-vendor` rather than committed, so a
 // freshly cloned checkout can reach this page without it. Say so plainly
 // instead of failing at the first `Plotly.react`.
-if (typeof Plotly === 'undefined') {
+const plotlyMissing = typeof Plotly === 'undefined';
+if (plotlyMissing) {
+  showGate('');
   el('gate-error').innerHTML =
     '<div class="error"><h2>plotly.js is missing</h2><p>The extension ships the ' +
     'bundle rather than fetching it from a CDN, and it has not been written yet. ' +
@@ -649,13 +785,53 @@ if (typeof Plotly === 'undefined') {
   el('run').disabled = true;
 }
 
-(async () => {
+/**
+ * What happens when the tab opens: as little of it in front of the reader as
+ * possible.
+ *
+ * The good path is silent. The background read the portal tab before this page
+ * existed, so the token, the API URL and the organisation are already waiting;
+ * the report starts and the reader sees figures. Everything below is the
+ * arithmetic of *which* failure to explain when that does not happen.
+ *
+ * The remembered token is tried only when the portal tab offered none. It is
+ * the older mechanism and the weaker one -- it can be an hour stale, where the
+ * portal tab is by definition current -- so it is a fallback to a fallback,
+ * and it exists for the reader who closed the portal but not the browser.
+ */
+async function boot() {
+  const context = await handover();
+  const apiUrl = context?.apiUrl ?? el('api-url').value.trim();
+
+  state.customerUuid = context?.customerUuid ?? null;
+  state.customerName = context?.customerName ?? null;
+  el('api-url').value = apiUrl;
+  state.cache = new MonthCache(apiUrl);
+  await showCacheNote();
+
+  if (plotlyMissing) return;
+
+  if (context?.token) {
+    await build({ token: context.token, apiUrl, fromPortal: true });
+    return;
+  }
+
   const stored = await session.get();
   if (stored) {
     el('token').value = stored;
     el('remember').checked = true;
+    await build({ token: stored, apiUrl, fromPortal: false });
+    return;
   }
-  const cache = new MonthCache(el('api-url').value.trim());
-  state.cache = cache;
-  await showCacheNote();
-})();
+
+  showGate(
+    context
+      ? 'The portal tab is open but holds no token — sign in to the portal, then press ' +
+        'the toolbar button again. Or paste one here.'
+      : 'Open the portal, sign in, and press the toolbar button from that tab: the ' +
+        'extension then reads the token and your organisation without being asked. ' +
+        'Failing that, paste a token here.',
+  );
+}
+
+boot();

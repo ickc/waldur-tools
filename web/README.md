@@ -1,7 +1,7 @@
 # The utilisation report, in a browser
 
 A browser extension that builds the same utilisation report as
-`waldur-tools viz`, live, from a portal API token pasted into the page. No
+`waldur-tools viz`, live, off the portal tab you are already signed in to. No
 install of this package, no Python, no snapshot — for the people who want the
 answer without the toolchain.
 
@@ -10,8 +10,59 @@ pixi run web-vendor      # writes web/vendor/plotly.min.js, once
 ```
 
 Then load `web/` as an unpacked extension — `chrome://extensions` →
-*Developer mode* → *Load unpacked* — and click the toolbar button. Paste a
-token, press **Build the report**.
+*Developer mode* → *Load unpacked*.
+
+**Open your organisation's dashboard in the portal and press the toolbar
+button.** That is the whole interaction. The report opens in a new tab and
+starts building.
+
+## Nothing to fill in
+
+The three things this used to ask for are all in the tab you pressed the button
+from, and `src/portal.js` reads them out of it:
+
+| What | Where it comes from | If that fails |
+| --- | --- | --- |
+| The API token | `localStorage`, key `waldur/auth/token` | the paste box, as before |
+| The API URL | an origin the page has fetched `/api/` from; else the favicon's origin; else the remembered resource filter; else `portal.` → `portal-api.` | a text box |
+| The organisation | the UUID in `/organizations/<uuid>/`; else the `customer`-scoped entry in `users/me/`; else the largest in scope | the picker, which is always there |
+
+The organisation one is the point. **No institution is named anywhere in this
+source.** An RSE at any partner opens *their* organisation's dashboard, presses
+the button, and gets *their* figures — nobody has to edit a default and nobody
+needs an account at another institution to make it work. The command-line tool
+keeps its `--customer` default because it is run from a checkout by whoever
+configured it; the browser has a better answer available and uses it.
+
+The two things the portal genuinely cannot answer — how many nodes the machine
+has and what share of it your organisation holds — sit on the report itself, as
+editable assumptions beside the organisation picker rather than a gate in front
+of it. There is no per-organisation entitlement in the API to read them from:
+`customer-credits` carries a credit balance but no expected consumption, and
+there is no customer quota endpoint. **The 10% default is the GW4 partner share
+and may not be yours**; changing either box re-renders from rows already in
+hand and costs no request.
+
+## What is read, and how much to trust it
+
+`waldur/auth/token` is a HomePort internal, not a documented API, and a Waldur
+upgrade may rename it. So it is never trusted on its own: the token is put to
+the API before anything is built, and one the portal rejects falls back to the
+paste box with the reason on it — the same box, demoted from front door to
+fallback. The portal's account menu still offers *Copy API token* for that path.
+
+Reading it needs `activeTab` and `scripting`, plus a host permission for the
+portal front end so a portal tab that is merely *open* can be read too — the
+button then works from any tab, not only from the portal. `background.js` holds
+the readings in memory, keyed by the report tab, and drops them the moment that
+tab collects them.
+
+**Tokens live an hour.** A report left open long enough will meet a 401, and
+the answer is not to make you fetch a new one: the front end in the portal tab
+has been refreshing the token all along, so `WaldurClient` asks the background
+to read it again and retries once. A *pasted* token is not retried — there is
+nowhere to go back to, and silently substituting another account's token would
+be worse than the error.
 
 ## Why an extension, and not a web page
 
@@ -168,12 +219,13 @@ again. Staleness is caught by arithmetic rather than by an expiry someone guesse
 
 ## The token
 
-Held in a variable, sent to the portal and to nothing else. If you tick *keep
-until this browser closes* it goes in `chrome.storage.session`, which lives in
-memory and is dropped on browser exit — never `localStorage`, which would leave a
-token on disk long after the portal expired it. **Portal tokens expire within
-hours, not days.** *Clear cached data* removes both the token and the cached
-months.
+Held in a variable, sent to the portal and to nothing else. On the ordinary path
+it is read from the portal tab at the moment you press the button and is never
+written down at all. On the paste path, ticking *keep until this browser closes*
+puts it in `chrome.storage.session`, which lives in memory and is dropped on
+browser exit — never `localStorage`, which would leave a token on disk long
+after the portal expired it. **Portal tokens expire within the hour.** *Clear
+cached data* removes both the token and the cached months.
 
 ## Tests
 
@@ -200,6 +252,23 @@ stub portal that misbehaves in the specific way the real one did: a short page, 
 duplicated row, a filter silently ignored, months that do not add up, a `Link`
 header pointing back at itself, and a cache gone stale under a backfill.
 
+**`tests/background.test.mjs` — the handover, which no browser tool can see.**
+An extension's own pages are invisible to every browser-automation tool going,
+so "load it and click" is the only manual check and it is a slow one. The click
+handler is therefore driven against a fake `chrome`. The case it exists for is a
+race: `tabs.create` resolves with the new tab and only *then* can the readings
+be filed under its id, while the page in that tab has been loading the whole
+time and may ask first. Losing that race drops the reader on the paste form for
+no reason, on some runs and not others. So a request that arrives early is
+parked rather than refused, and a report tab nobody is bringing readings for —
+one opened by typing its URL — is answered by a timeout instead.
+
+**`tests/portal.test.mjs` — the inference nobody can exercise by hand.** The
+API-URL and organisation routes above each exist for a case the developer's own
+account cannot reach: an unconventional hostname, a page with no UUID in it, a
+reader at another institution. Those paths are checked here against readings
+written out by hand, with fabricated UUIDs and a `.test` hostname.
+
 **`tests/figures.test.mjs` — the rules that are invisible in a diff.** No second
 y-axis, no eighth hue, the tail folded into the neutral band and still counted in
 the total, only colours the theme switch can swap, the partial month hatched, and
@@ -216,17 +285,19 @@ answers. Load the extension and look at it before believing the suite.
 ## Layout
 
 ```
-manifest.json          MV3: host permission for the API, one action, no content scripts
-src/background.js      opens the report in a tab
+manifest.json          MV3: host permissions, activeTab + scripting, one action
+src/background.js      reads the portal tab, then opens the report knowing
+src/portal.js          what to read off the portal, and how far to trust it
 src/report.html/.css   the page shell
-src/report.js          the orchestrator: token, fetch order, progressive render
+src/report.js          the orchestrator: handover, fetch order, progressive render
 src/api.js             paging, and the guards that make the totals trustworthy
 src/store.js           the IndexedDB month cache
 src/reports.js         the analyses — the file the parity test pins
 src/figures.js         the plotly figures
 src/palette.js         colour, and the light/dark swap
 src/page.js            prose, tiles, table views
-tests/*.test.mjs       parity with the Python, the paging guards, the figure rules
+tests/*.test.mjs       parity with the Python, the paging guards, the portal
+                       inference, the figure rules
 tests/*.json           the golden fixture, generated by tests/test_web_parity.py
 vendor/plotly.min.js   written by `pixi run web-vendor`, not committed
 ```
@@ -241,6 +312,10 @@ node appears only to run the parity test.
 
 ## Pointing it at another Waldur
 
-Change the API URL on the form. `optional_host_permissions` covers it, and the
-extension asks for that host the first time — so it stays useful against a second
-deployment without claiming access to every site at install time.
+Nothing to configure for another *organisation* on this deployment — that is the
+whole design above. For another *deployment*, the API URL is inferred from
+whatever portal you press the button on, and `activeTab` covers reading that tab
+whichever host it is. The API host itself is covered by
+`optional_host_permissions`, which the extension asks for the first time it
+needs it, so it stays useful against a second deployment without claiming access
+to every site at install time.

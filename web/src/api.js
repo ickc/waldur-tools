@@ -65,10 +65,19 @@ export class WaldurClient {
    * @param {object} options
    * @param {string} options.apiUrl  Base URL, no trailing slash.
    * @param {string} options.token   The portal token. Held in memory only.
+   * @param {?function(): Promise<?string>} options.renew  Asked for a fresh
+   *   token when the portal rejects this one, once per request. Portal tokens
+   *   live an hour, so a report left open over lunch *will* meet a 401 -- and
+   *   when the token was read out of a portal tab rather than pasted, the front
+   *   end in that tab has been quietly refreshing it the whole time. Recovering
+   *   from that without involving the reader is the difference between a report
+   *   that stays open and one that has to be rebuilt. Null means there is
+   *   nowhere to ask, and a 401 is final.
    */
-  constructor({ apiUrl, token }) {
+  constructor({ apiUrl, token, renew = null }) {
     this.apiUrl = apiUrl.replace(/\/+$/, '');
     this.token = token;
+    this.renew = renew;
   }
 
   url(endpoint) {
@@ -76,7 +85,7 @@ export class WaldurClient {
     return `${this.apiUrl}/api/${endpoint.replace(/^\/|\/$/g, '')}/`;
   }
 
-  async get(url, params) {
+  async get(url, params, { renewed = false } = {}) {
     const target = new URL(url);
     for (const [key, value] of Object.entries(params ?? {})) {
       target.searchParams.set(key, String(value));
@@ -92,13 +101,24 @@ export class WaldurClient {
       throw new WaldurError(`GET ${target.pathname} failed: ${error.message}`);
     }
     if (response.status === 401 || response.status === 403) {
-      // Worth saying outright: portal tokens expire within hours, not days, and
-      // an expired one is by far the likeliest reason to be reading this.
+      // Once, and only once: a renewal that is itself rejected means the reader
+      // has been signed out of the portal, and retrying that forever would turn
+      // one clear error into a loop.
+      if (this.renew && !renewed) {
+        const fresh = await this.renew();
+        if (fresh && fresh !== this.token) {
+          this.token = fresh;
+          return this.get(url, params, { renewed: true });
+        }
+      }
+      // Worth saying outright: portal tokens expire within the hour, and an
+      // expired one is by far the likeliest reason to be reading this.
       throw new WaldurError(
         'The portal rejected the token (HTTP ' +
           response.status +
-          '). Portal tokens expire within hours — issue a fresh one from your ' +
-          'account menu and paste it again.',
+          '). Portal tokens expire within the hour. Open the portal in another ' +
+          'tab, sign in, and press the toolbar button again — the extension ' +
+          'picks up the new token on its own.',
       );
     }
     if (!response.ok) {
@@ -106,6 +126,25 @@ export class WaldurClient {
       throw new WaldurError(`GET ${target.pathname} returned ${response.status}: ${body}`);
     }
     return response;
+  }
+
+  /**
+   * One record from a detail endpoint, such as `users/me`.
+   *
+   * Deliberately separate from `list`: none of the paging guards apply to a
+   * single object, and `list` throwing "not a list endpoint" at it is the right
+   * behaviour to keep. Nothing on the critical path depends on the answer, so a
+   * failure is null rather than an exception -- `users/me/` backs one fallback
+   * for one default, and losing the whole report over it would be absurd.
+   */
+  async record(endpoint) {
+    try {
+      const response = await this.get(this.url(endpoint));
+      const payload = await response.json();
+      return payload && !Array.isArray(payload) ? payload : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Rows an endpoint reports, via `X-Result-Count`. Filters are passed through. */

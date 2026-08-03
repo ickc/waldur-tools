@@ -181,7 +181,7 @@ describe('reading', () => {
     globalThis.fetch = async () => reply({ detail: 'nope' }, { status: 401 });
     await assert.rejects(
       () => client().count(ENDPOINT),
-      (error) => /expire within hours/.test(error.message),
+      (error) => /expire within the hour/.test(error.message),
     );
   });
 });
@@ -320,5 +320,64 @@ describe('pulling every month', () => {
     // February 2026 is the month `today` falls in: still being written to, so
     // a cached copy of it would go stale within the hour.
     assert.deepEqual(written, []);
+  });
+});
+
+/**
+ * Portal tokens live an hour, so a report left open over lunch *will* meet a
+ * 401. When the token was read out of a portal tab rather than pasted, the
+ * front end in that tab has been refreshing it the whole time and the recovery
+ * costs the reader nothing — but only if the retry actually happens, and a
+ * missing retry looks identical to a token that simply had not expired yet.
+ */
+describe('recovering from an expired token', () => {
+  /** A stub that rejects the first token it is shown and accepts the second. */
+  function expiring(good) {
+    const seen = [];
+    globalThis.fetch = async (target, init) => {
+      const token = init.headers.Authorization.replace('Token ', '');
+      seen.push(token);
+      if (token !== good) return reply({ detail: 'Invalid token.' }, { status: 401 });
+      return reply([], { headers: { 'x-result-count': '0' }, url: String(target) });
+    };
+    return seen;
+  }
+
+  it('asks for a fresh token, retries once, and keeps the new one', async () => {
+    const seen = expiring('fresh');
+    let asked = 0;
+    const renewing = new WaldurClient({
+      apiUrl: API,
+      token: 'stale',
+      renew: async () => {
+        asked += 1;
+        return 'fresh';
+      },
+    });
+
+    assert.deepEqual(await renewing.list('customers'), []);
+    assert.deepEqual(seen, ['stale', 'fresh']);
+    // Kept, not re-asked for: every subsequent request in the pull would
+    // otherwise round-trip to the portal tab before doing anything.
+    await renewing.list('customers');
+    assert.equal(asked, 1);
+  });
+
+  it('gives up when the renewal is rejected too, rather than looping', async () => {
+    // Signed out of the portal entirely: the fresh token is as dead as the old
+    // one, and retrying on every 401 would spin forever behind a progress bar.
+    expiring('never-issued');
+    const renewing = new WaldurClient({
+      apiUrl: API,
+      token: 'stale',
+      renew: async () => 'also-stale',
+    });
+    await assert.rejects(() => renewing.list('customers'), WaldurError);
+  });
+
+  it('does not retry a pasted token, which has no source to go back to', async () => {
+    const seen = expiring('fresh');
+    await assert.rejects(() => client().list('customers'), WaldurError);
+    assert.deepEqual(seen, ['secret']);
   });
 });

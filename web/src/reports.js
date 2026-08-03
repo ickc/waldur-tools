@@ -19,8 +19,17 @@ export const TOTAL_NODES = 384;
 /** The GW4 partner share of that machine held by this organisation. */
 export const DEFAULT_SHARE = 0.1;
 
-/** The organisation whose projects count as "ours" unless told otherwise. */
-export const DEFAULT_CUSTOMER = 'University of Exeter';
+/**
+ * There is deliberately no default organisation.
+ *
+ * The Python tool has one, because it is run from a checkout by the person who
+ * configured it. The browser version is opened from a portal tab, and which
+ * organisation that tab is showing is the answer -- an RSE at any institution
+ * should get their own figures without anyone editing this file. So `customer`
+ * is a required argument in spirit: passing `null` widens the scope to every
+ * project the token administers, which is a *choice* the picker offers, not a
+ * fallback for having failed to work out whose report this is.
+ */
 
 /** How far `reconcile` lets usage drift from the invoice, as a fraction. */
 export const RECONCILE_TOLERANCE = 0.01;
@@ -248,7 +257,7 @@ export function customersInScope(allocations) {
  * but their codes resolve to no name, no customer and no limit, so there is
  * nothing to attribute it to.
  */
-export function monthlyRows(usage, scope, customer = DEFAULT_CUSTOMER) {
+export function monthlyRows(usage, scope, customer = null) {
   const projects = new Map();
   for (const project of scope) {
     if (customer !== null && project.customer_name !== customer) continue;
@@ -364,7 +373,7 @@ export function monthly(rows, { nodes = TOTAL_NODES, share = DEFAULT_SHARE } = {
  * an estate can carry two accounting rows sharing a name under different UUIDs
  * where only one holds the credits.
  */
-export function allocationsReport(scope, summary, { asOf, customer = DEFAULT_CUSTOMER } = {}) {
+export function allocationsReport(scope, summary, { asOf, customer = null } = {}) {
   const awarded = new Map();
   for (const row of summary) {
     if (row.project_uuid) awarded.set(row.project_uuid, row);
@@ -446,7 +455,7 @@ export function committed(allocation, months, asOf) {
  * something": without it the active-project count reads as a plateau rather
  * than as a fraction.
  */
-export function projectsExisting(projects, months, customer = DEFAULT_CUSTOMER) {
+export function projectsExisting(projects, months, customer = null) {
   const created = projects
     .filter((row) => customer === null || row.customer_name === customer)
     .map((row) => (row.created ? String(row.created).slice(0, 10) : null))
@@ -468,7 +477,7 @@ export function projectsExisting(projects, months, customer = DEFAULT_CUSTOMER) 
  * unallocated credit reaches no project and a project is the only thing that
  * can spend it. Both are measured net of spend.
  */
-export function creditPosition(customers, customer = DEFAULT_CUSTOMER) {
+export function creditPosition(customers, customer = null) {
   let held = 0;
   let spare = 0;
   for (const row of customers) {
@@ -506,7 +515,7 @@ function customerOfInvoice(record) {
  * to zero a grant-funded invoice out, so an invoice can bill thousands of node
  * hours and show a total near zero.
  */
-export function invoiced(invoices, customer = DEFAULT_CUSTOMER) {
+export function invoiced(invoices, customer = null) {
   const kept = invoices.filter(
     (record) => customer === null || customerOfInvoice(record) === customer,
   );
@@ -539,7 +548,7 @@ export function invoiced(invoices, customer = DEFAULT_CUSTOMER) {
  * shape a duplicated page takes.
  */
 export function reconcile(rows, invoices, {
-  customer = DEFAULT_CUSTOMER,
+  customer = null,
   asOf,
   tolerance = RECONCILE_TOLERANCE,
 } = {}) {

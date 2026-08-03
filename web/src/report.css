@@ -119,10 +119,24 @@ th { color: var(--ink); font-weight: 600; }
 .gate .check { display: flex; gap: 7px; align-items: center; font-size: .85rem; }
 .gate .check input { width: auto; padding: 0; }
 
+/*
+  What the reader sees for the fraction of a second between the tab opening and
+  the background handing over the portal readings. Same box as the gate, so the
+  page does not jump if the handover fails and the gate takes its place.
+*/
+.starting {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 24px; max-width: 640px; margin: 40px auto;
+}
+
 .controls {
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
   margin-bottom: 20px; font-size: .85rem;
 }
+/* The nodes and share boxes: assumptions, sized to look like the labels they
+   sit beside rather than like a form the reader has to fill in. */
+.controls input[type='text'] { width: 5.5em; padding: 4px 7px; font-size: .85rem; }
+.controls label { color: var(--muted); }
 
 .progress { margin: 16px 0 4px; font-size: .85rem; color: var(--muted); }
 .progress .bar {

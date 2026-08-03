@@ -16,29 +16,29 @@
 <body>
 <div class="wrap">
 
-  <div class="gate" id="gate">
+  <!--
+    The gate is the fallback, not the front door. Opened from a portal tab the
+    extension reads the token, the API URL and the organisation out of the page
+    and never shows this; it appears only when one of those readings failed, and
+    it says which.
+  -->
+  <div class="gate" id="gate" hidden>
     <h1>Isambard 3 utilisation</h1>
-    <p class="sub">Reads the Waldur portal API directly and builds the utilisation
-    report in this tab. Nothing is uploaded anywhere; the token is sent to the portal
-    and to nothing else.</p>
+    <p class="sub" id="gate-why">Reads the Waldur portal API directly and builds the
+    utilisation report in this tab. Nothing is uploaded anywhere; the token is sent to
+    the portal and to nothing else.</p>
 
     <label for="token">Portal API token</label>
     <input type="password" id="token" autocomplete="off" spellcheck="false"
-           placeholder="from the portal, under your own account menu">
-    <p class="sub" style="margin-top:6px">Portal tokens expire within hours, not days.</p>
+           placeholder="portal account menu, top right → Copy API token">
+    <p class="sub" style="margin-top:6px">Portal tokens expire within the hour. Opening
+    the portal in another tab and pressing the toolbar button again picks up a fresh one
+    on its own.</p>
 
     <div class="row">
       <div>
         <label for="api-url">API URL</label>
         <input type="text" id="api-url" value="https://portal-api.isambard.ac.uk">
-      </div>
-      <div>
-        <label for="nodes">Compute nodes</label>
-        <input type="text" id="nodes" value="384" inputmode="numeric">
-      </div>
-      <div>
-        <label for="share">Our share</label>
-        <input type="text" id="share" value="10%" inputmode="decimal">
       </div>
     </div>
 
@@ -47,8 +47,12 @@
       <label class="check"><input type="checkbox" id="remember">
         Keep the token until this browser closes</label>
     </div>
-    <p class="sub" id="cache-note"></p>
     <div id="gate-error"></div>
+  </div>
+
+  <div class="starting" id="starting">
+    <h1>Isambard 3 utilisation</h1>
+    <p class="sub">Reading the portal tab…</p>
   </div>
 
   <div id="report" hidden>
@@ -58,6 +62,22 @@
       <select id="customer"></select>
       <span id="reconcile-badge"></span>
       <span style="flex:1"></span>
+      <!--
+        The two assumptions the portal cannot answer. `customer-credits` carries
+        no expected consumption and there is no per-organisation quota endpoint,
+        so the size of the machine and this organisation's share of it are the
+        reader's to state. They sit here rather than behind a gate because they
+        are part of reading the figures, not part of fetching them: changing
+        either re-renders from rows already in hand and costs no request.
+      -->
+      <label for="nodes">Nodes</label>
+      <input type="text" id="nodes" value="384" inputmode="numeric" size="4"
+             title="Compute nodes in the machine as a whole.">
+      <label for="share">Share</label>
+      <input type="text" id="share" value="10%" inputmode="decimal" size="4"
+             title="This organisation's share of the machine. The portal does not
+                    publish it, so it is an assumption: 10% is the GW4 partner share
+                    and may not be yours.">
       <button type="button" id="refresh"
               title="Refetches the month in progress and rechecks the history against the
                      portal's own row counts. Complete months come from the cache unless
@@ -65,6 +85,13 @@
       <button type="button" id="forget"
               title="Removes the cached months and the remembered token from this browser.">
         Clear cached data</button>
+      <!--
+        What is held in this browser, beside the button that removes it. It used
+        to sit on the gate, which the reader now never sees on the ordinary
+        path — so it said nothing to nobody. Portal data on the reader's disk is
+        exactly the thing that should not go unmentioned.
+      -->
+      <span class="sub" id="cache-note"></span>
     </div>
     <div class="progress" id="progress" hidden>
       <span id="progress-text"></span>
