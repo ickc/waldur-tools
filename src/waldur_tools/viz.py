@@ -239,8 +239,11 @@ def figure_share(
     hundred = [100.0] * len(months)
     # Omitting the awards means "no second line", not "a line of length zero":
     # pad to the month count so the strict zip below stays a real length check
-    # on a list a caller did pass, rather than failing on the default.
-    awarded = awarded or [0.0] * len(months)
+    # on a list a caller did pass, rather than failing on the default. Only
+    # ``None`` is the default -- an explicit ``[]`` is a caller passing a list of
+    # the wrong length, and the zip is entitled to say so.
+    if awarded is None:
+        awarded = [0.0] * len(months)
     awarded_pct = [
         100 * value / limit if limit else 0.0
         for value, limit in zip(awarded, entitlement, strict=True)

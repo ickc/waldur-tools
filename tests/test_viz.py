@@ -279,6 +279,19 @@ def test_the_headline_rejects_an_awards_list_of_the_wrong_length(snapshot):
         viz.figure_share(totals, 384, 0.10, [0.0] * (totals.height + 1))
 
 
+def test_the_headline_rejects_an_empty_awards_list(snapshot):
+    """An accidental ``[]`` is the wrong length too, and must not read as the default.
+
+    Only ``None`` means "no awards". Treating any falsy value as the default
+    would let a caller who built an empty list by mistake past the one check
+    that would have told them.
+    """
+    totals = reports.monthly_totals(snapshot, customer="UKRI")
+    assert totals.height > 0
+    with pytest.raises(ValueError):
+        viz.figure_share(totals, 384, 0.10, [])
+
+
 def test_credit_position_reads_the_customer_level_fields(snapshot):
     """The only organisation-level quantities the portal carries.
 
