@@ -13,6 +13,9 @@ portal behind [Isambard](https://portal.isambard.ac.uk) — the same API the
 - **Report** — a small CLI over the analyses, with CSV/JSON/parquet export.
 - **Visualise** — `viz` writes one self-contained HTML page answering "are we
   using our 10% of Isambard 3?", with interactive figures and no server.
+- **Hand it over** — [`web/`](web/README.md) is the same report as a browser
+  extension, built live off the portal tab you are already signed in to, for
+  people who will never install this package.
 
 ## Setup
 
@@ -149,6 +152,38 @@ snapshot was taken in is partial**, so it is hatched in the first figure and
 excluded from every average. And **mean monthly allocation is a construction**,
 not something the portal reports: credits are granted as a lump for a period,
 and this spreads them evenly across it.
+
+### The same report, in a browser
+
+For the people who want the answer and not the toolchain, [`web/`](web/README.md)
+is a browser extension that builds the same report live from the portal tab —
+no Python, no snapshot, nothing installed but the extension.
+
+```bash
+pixi run web-vendor    # once: writes the plotly bundle it loads
+```
+
+Then load `web/` unpacked in Chrome, open your organisation's dashboard in the
+portal, and press the toolbar button. That is the whole interaction: the token,
+the API URL and the organisation are all read out of that tab, so nothing has to
+be pasted and no institution is named anywhere in `web/`. A paste box remains as
+the fallback for when a reading fails.
+
+It carries six of the eight figures. The three job-shape ones need `sacct` and
+are simply absent; the demand figure the portal *can* answer is there. It adds
+one thing the generated page does not have: the `reconcile` check runs on the
+page, as a badge, because nobody reading a web page is going to run it
+separately.
+
+**Why an extension rather than a URL:** the deployment's CORS allowlist holds
+exactly one origin, the portal's own front end, so a page served from anywhere
+else — or opened from disk — can never read the API. An extension with host
+permissions is not subject to CORS. [web/README.md](web/README.md) has the
+measurement, and what would have to change to make it a plain web page.
+
+The formulas are a second implementation, so they are pinned to this one: the
+Python reports generate a golden fixture and CI fails if the JavaScript drifts
+off it. `pixi run check` runs both halves.
 
 ### Job shape, from SLURM
 
@@ -296,8 +331,9 @@ That drift is the main reason the raw reader exists as a fallback.
 ## Development
 
 ```bash
-pixi run check     # lint + typecheck + test
+pixi run check     # lint + typecheck + test + the browser extension's parity test
 ```
 
 See [DEVELOPER.md](DEVELOPER.md) for the data model, the join keys, and what
-each report does to its inputs.
+each report does to its inputs, and [web/README.md](web/README.md) for the
+browser extension and how its arithmetic is held to this one's.

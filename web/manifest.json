@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Isambard 3 utilisation",
+  "version": "0.2.0",
+  "description": "Builds the Waldur utilisation report in the browser, from the portal tab you are already signed in to.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://portal-api.isambard.ac.uk/*",
+    "https://portal.isambard.ac.uk/*"
+  ],
+  "optional_host_permissions": ["https://*/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Build the Isambard 3 utilisation report"
+  }
+}

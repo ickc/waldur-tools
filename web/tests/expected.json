@@ -1,0 +1,182 @@
+{
+  "allocations": [
+    {
+      "award_months": 1,
+      "customer_name": "UKRI",
+      "end_date": null,
+      "mean_monthly_allocation": 1000.0,
+      "project_code": "abc2",
+      "project_name": "Project B",
+      "start_date": "2026-06-01",
+      "total_credits": 1000.0
+    },
+    {
+      "award_months": 8,
+      "customer_name": "UKRI",
+      "end_date": "2026-08-01",
+      "mean_monthly_allocation": 3750.0,
+      "project_code": "abc1",
+      "project_name": "Project A",
+      "start_date": "2026-01-01",
+      "total_credits": 30000.0
+    }
+  ],
+  "as_of": "2026-02-20",
+  "committed": [
+    0.0,
+    3750.0
+  ],
+  "credit_position": [
+    50000.0,
+    20000.0
+  ],
+  "customer": "UKRI",
+  "in_scope": [
+    {
+      "customer_name": "UKRI",
+      "project_code": "abc1",
+      "project_name": "Project A",
+      "project_uuid": "pa"
+    },
+    {
+      "customer_name": "UKRI",
+      "project_code": "abc2",
+      "project_name": "Project B",
+      "project_uuid": "pb"
+    }
+  ],
+  "invoiced": [
+    {
+      "incurred_costs": 1.5,
+      "invoice_state": "created",
+      "month": "2025-01"
+    },
+    {
+      "incurred_costs": 3.5,
+      "invoice_state": "pending",
+      "month": "2026-02"
+    }
+  ],
+  "monthly": [
+    {
+      "active_users": 1,
+      "customer_name": "UKRI",
+      "entitlement_node_hours": 25804.800000000003,
+      "mean_nodes": 0.001488095238095238,
+      "month": "2026-02",
+      "node_hours": 1.0,
+      "pct_of_entitlement": 0.0038752480158730155,
+      "project_code": "abc2",
+      "project_name": "Project B"
+    },
+    {
+      "active_users": 1,
+      "customer_name": "UKRI",
+      "entitlement_node_hours": 25804.800000000003,
+      "mean_nodes": 0.003720238095238095,
+      "month": "2026-02",
+      "node_hours": 2.5,
+      "pct_of_entitlement": 0.009688120039682538,
+      "project_code": "abc1",
+      "project_name": "Project A"
+    },
+    {
+      "active_users": 1,
+      "customer_name": "UKRI",
+      "entitlement_node_hours": 28569.600000000006,
+      "mean_nodes": 0.002016129032258064,
+      "month": "2025-01",
+      "node_hours": 1.5,
+      "pct_of_entitlement": 0.005250336021505375,
+      "project_code": "abc1",
+      "project_name": "Project A"
+    }
+  ],
+  "monthly_totals": [
+    {
+      "active_projects": 1,
+      "active_users": 1,
+      "entitlement_node_hours": 28569.600000000006,
+      "is_partial": false,
+      "mean_nodes": 0.002016129032258064,
+      "month": "2025-01",
+      "node_hours": 1.5,
+      "pct_of_entitlement": 0.005250336021505375,
+      "projects_with_usage_rows": 1,
+      "unused_node_hours": 28568.100000000006
+    },
+    {
+      "active_projects": 2,
+      "active_users": 2,
+      "entitlement_node_hours": 25804.800000000003,
+      "is_partial": true,
+      "mean_nodes": 0.005208333333333333,
+      "month": "2026-02",
+      "node_hours": 3.5,
+      "pct_of_entitlement": 0.013563368055555554,
+      "projects_with_usage_rows": 2,
+      "unused_node_hours": 25801.300000000003
+    }
+  ],
+  "nodes": 384,
+  "people_with_access": 2,
+  "projects_existing": [
+    {
+      "month": "2025-01",
+      "projects": 0
+    },
+    {
+      "month": "2026-02",
+      "projects": 2
+    }
+  ],
+  "queue_monthly": [
+    {
+      "busiest_day_users": 1,
+      "mean_wait_hours": 0.002777777777777778,
+      "month": "2026-03",
+      "num_jobs": 10,
+      "total_wait_seconds": 100
+    }
+  ],
+  "ranked_bands": [
+    {
+      "band": "Project A",
+      "month": "2025-01",
+      "project_code": "abc1"
+    },
+    {
+      "band": "Project A",
+      "month": "2026-02",
+      "project_code": "abc1"
+    },
+    {
+      "band": "Project B",
+      "month": "2026-02",
+      "project_code": "abc2"
+    }
+  ],
+  "reconcile": [
+    {
+      "difference": 0.0,
+      "incurred_costs": 1.5,
+      "invoice_state": "created",
+      "is_partial": false,
+      "month": "2025-01",
+      "node_hours": 1.5,
+      "pct_difference": 0.0,
+      "status": "ok"
+    },
+    {
+      "difference": 0.0,
+      "incurred_costs": 3.5,
+      "invoice_state": "pending",
+      "is_partial": true,
+      "month": "2026-02",
+      "node_hours": 3.5,
+      "pct_difference": 0.0,
+      "status": "ok"
+    }
+  ],
+  "share": 0.1
+}

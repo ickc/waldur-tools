@@ -1,0 +1,319 @@
+{
+  "customers": [
+    {
+      "customer_credit": "50000.00000",
+      "customer_unallocated_credit": "20000.00000",
+      "name": "UKRI",
+      "projects_count": 2,
+      "uuid": "cust-ukri"
+    },
+    {
+      "customer_credit": null,
+      "customer_unallocated_credit": null,
+      "name": "Example Internal Projects",
+      "projects_count": 1,
+      "uuid": "cust-legacy"
+    }
+  ],
+  "invoices": [
+    {
+      "customer_details": {
+        "email": "billing@example.test",
+        "name": "UKRI"
+      },
+      "incurred_costs": "1.5000000000",
+      "items": [
+        {
+          "billing_type": "usage",
+          "measured_unit": "hours",
+          "name": "Isambard 3 / NODE",
+          "project_name": "Project A",
+          "project_uuid": "pa",
+          "quantity": "1.5000000000",
+          "total": "1.50",
+          "unit_price": "1.0000000000"
+        },
+        {
+          "billing_type": "fixed",
+          "measured_unit": "",
+          "name": "Credit",
+          "quantity": "1",
+          "total": "-1.50",
+          "unit_price": "-1.50"
+        }
+      ],
+      "month": 1,
+      "number": 302501,
+      "price": "0.0000000000",
+      "state": "created",
+      "tax": "0.0000000000",
+      "total": "0.0000000000",
+      "year": 2025
+    },
+    {
+      "customer_details": {
+        "email": "billing@example.test",
+        "name": "UKRI"
+      },
+      "incurred_costs": "3.5000000000",
+      "items": [
+        {
+          "billing_type": "usage",
+          "measured_unit": "hours",
+          "name": "Isambard 3 / NODE",
+          "project_name": "Project A",
+          "project_uuid": "pa",
+          "quantity": "3.5000000000",
+          "total": "3.50",
+          "unit_price": "1.0000000000"
+        },
+        {
+          "billing_type": "fixed",
+          "measured_unit": "",
+          "name": "Credit",
+          "quantity": "1",
+          "total": "-3.50",
+          "unit_price": "-3.50"
+        }
+      ],
+      "month": 2,
+      "number": 302602,
+      "price": "0.0000000000",
+      "state": "pending",
+      "tax": "0.0000000000",
+      "total": "0.0000000000",
+      "year": 2026
+    },
+    {
+      "customer_details": {
+        "email": "billing@example.test",
+        "name": "Other Uni"
+      },
+      "incurred_costs": "99.0000000000",
+      "items": [
+        {
+          "billing_type": "usage",
+          "measured_unit": "hours",
+          "name": "Isambard 3 / NODE",
+          "project_name": "Project A",
+          "project_uuid": "pa",
+          "quantity": "99.0000000000",
+          "total": "99.00",
+          "unit_price": "1.0000000000"
+        },
+        {
+          "billing_type": "fixed",
+          "measured_unit": "",
+          "name": "Credit",
+          "quantity": "1",
+          "total": "-99.00",
+          "unit_price": "-99.00"
+        }
+      ],
+      "month": 2,
+      "number": 302602,
+      "price": "0.0000000000",
+      "state": "created",
+      "tax": "0.0000000000",
+      "total": "0.0000000000",
+      "year": 2026
+    }
+  ],
+  "openportal-accounting-summary": [
+    {
+      "current_month_spend": "2000.00",
+      "customer_name": "UKRI",
+      "end_date": "2026-08-01",
+      "project_name": "Project A",
+      "project_uuid": "pa",
+      "start_date": "2026-01-01",
+      "total_credits": "30000.00000",
+      "total_spend": "10000.00"
+    },
+    {
+      "current_month_spend": "0.00",
+      "customer_name": "UKRI",
+      "end_date": null,
+      "project_name": "Project B",
+      "project_uuid": "pb",
+      "start_date": "2026-06-01",
+      "total_credits": "1000.00000",
+      "total_spend": "0.00"
+    }
+  ],
+  "openportal-allocation-user-usage": [
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/aaa/",
+      "full_name": "Alice",
+      "month": 1,
+      "node_usage": "1.5",
+      "user": "https://portal.example.test/api/users/alice/",
+      "username": "alice.abc1.brics",
+      "year": 2025
+    },
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/aaa/",
+      "full_name": "Alice",
+      "month": 2,
+      "node_usage": "2.5",
+      "user": "https://portal.example.test/api/users/alice/",
+      "username": "alice.abc1.brics",
+      "year": 2026
+    },
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/bbb/",
+      "full_name": "Bob",
+      "month": 2,
+      "node_usage": "1.0",
+      "user": "https://portal.example.test/api/users/bob/",
+      "username": "bob.abc2.brics",
+      "year": 2026
+    },
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/zzz/",
+      "full_name": "Carol",
+      "month": 2,
+      "node_usage": "99.0",
+      "user": "https://portal.example.test/api/users/carol/",
+      "username": "carol.zzz.brics",
+      "year": 2026
+    }
+  ],
+  "openportal-allocations": [
+    {
+      "backend_id": "abc1.brics",
+      "customer_name": "UKRI",
+      "groupname": "brics.abc1",
+      "is_active": true,
+      "node_limit": 100,
+      "node_usage": "50.0",
+      "project_name": "Project A",
+      "project_uuid": "pa",
+      "service_name": "Isambard 3",
+      "state": "OK",
+      "url": "https://portal.example.test/api/openportal-allocations/aaa/",
+      "uuid": "aaa"
+    },
+    {
+      "backend_id": "abc1.brics",
+      "customer_name": "UKRI",
+      "groupname": "brics.abc1",
+      "is_active": true,
+      "node_limit": 100,
+      "node_usage": "0.0",
+      "project_name": "Project A",
+      "project_uuid": "pa",
+      "service_name": "Isambard 3 Multi Architecture System",
+      "state": "OK",
+      "url": "https://portal.example.test/api/openportal-allocations/aaa2/",
+      "uuid": "aaa2"
+    },
+    {
+      "backend_id": "abc2.brics",
+      "customer_name": "UKRI",
+      "groupname": "brics.abc2",
+      "is_active": true,
+      "node_limit": 200,
+      "node_usage": "0.0",
+      "project_name": "Project B",
+      "project_uuid": "pb",
+      "service_name": "Isambard 3",
+      "state": "OK",
+      "url": "https://portal.example.test/api/openportal-allocations/bbb/",
+      "uuid": "bbb"
+    }
+  ],
+  "openportal-associations": [
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/aaa/",
+      "groupname": "brics.abc1",
+      "useridentifier": "alice.abc1.brics",
+      "username": "alice.abc1",
+      "uuid": "1"
+    },
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/aaa2/",
+      "groupname": "brics.abc1",
+      "useridentifier": "alice.abc1.brics",
+      "username": "alice.abc1",
+      "uuid": "1b"
+    },
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/unseen/",
+      "groupname": "brics.abc2",
+      "useridentifier": "bob.abc2.brics",
+      "username": "bob.abc2",
+      "uuid": "2"
+    },
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/zzz/",
+      "groupname": "brics.zzz",
+      "useridentifier": "carol.zzz.brics",
+      "username": "carol.zzz",
+      "uuid": "3"
+    },
+    {
+      "allocation": "https://portal.example.test/api/openportal-allocations/hidden/",
+      "groupname": null,
+      "useridentifier": null,
+      "username": null,
+      "uuid": "4"
+    }
+  ],
+  "openportal-project-usage-reports": [
+    {
+      "id": 1,
+      "is_complete": true,
+      "month": 3,
+      "project_identifier": "abc1.brics",
+      "report": {
+        "project": "abc1.brics",
+        "reports": {
+          "2026-03-01": {
+            "num_jobs": 10,
+            "total_wait_seconds": 100,
+            "user_job_counts": {
+              "alice": 10
+            }
+          },
+          "2026-03-02": {
+            "num_jobs": 0,
+            "total_wait_seconds": 0,
+            "user_job_counts": {}
+          }
+        }
+      },
+      "resource": "brics.i3.clusters.macs",
+      "year": 2026
+    }
+  ],
+  "projects": [
+    {
+      "created": "2025-01-05T00:00:00+00:00",
+      "customer_name": "UKRI",
+      "name": "Project A"
+    },
+    {
+      "created": "2026-01-05T00:00:00+00:00",
+      "customer_name": "UKRI",
+      "name": "Project B"
+    },
+    {
+      "created": "2024-01-05T00:00:00+00:00",
+      "customer_name": "Other Uni",
+      "name": "Elsewhere"
+    }
+  ],
+  "users": [
+    {
+      "email": "alice@example.test",
+      "full_name": "Alice A",
+      "unix_username": "alice"
+    },
+    {
+      "email": "bob@example.test",
+      "full_name": "Bob B",
+      "unix_username": "bob"
+    }
+  ]
+}

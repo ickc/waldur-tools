@@ -1,0 +1,9 @@
+{
+  "name": "waldur-tools-web",
+  "private": true,
+  "type": "module",
+  "description": "Marks web/src as ES modules so node can import the same files the extension does.",
+  "scripts": {
+    "test": "node --test 'tests/*.test.mjs'"
+  }
+}
