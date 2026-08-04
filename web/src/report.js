@@ -81,6 +81,16 @@ const state = {
   customerUuid: null,
   /** The organisation name the portal tab remembered, when it offered no UUID. */
   customerName: null,
+  /**
+   * The project the portal tab was showing, as a UUID.
+   *
+   * A `/projects/<uuid>/` page names no organisation, and `portal.js` returns
+   * the project rather than pretending otherwise. It resolves to one through
+   * the allocations, which carry `project_uuid` alongside `customer_name` --
+   * and it has to be kept for that, because a reader looking at one project is
+   * telling us whose report they want just as plainly as a dashboard does.
+   */
+  projectUuid: null,
   /** Whether the token came from the portal tab, and so can be re-read. */
   tokenFromPortal: false,
   loading: false,
@@ -501,10 +511,15 @@ function populateCustomers(allocations) {
  * 1. **The organisation UUID from the portal tab's URL**, resolved through the
  *    `customers` rows already in hand. It is where the reader was looking, so
  *    it is what they meant.
- * 2. **The organisation their token belongs to**, from the `customer`-scoped
+ * 2. **The organisation that owns the project the tab was showing**, resolved
+ *    through the allocations. A `/projects/<uuid>/` page states an
+ *    organisation just as plainly as a dashboard does, only indirectly.
+ * 3. **The organisation the tab's remembered filter named.** Where the reader
+ *    looked once, rather than where they are looking now.
+ * 4. **The organisation their token belongs to**, from the `customer`-scoped
  *    entry in `users/me/`'s permissions. Works from any portal page at all,
  *    including one with no UUID in it.
- * 3. **Whichever organisation holds the most projects** in scope. A guess, and
+ * 5. **Whichever organisation holds the most projects** in scope. A guess, and
  *    the picker is right there.
  *
  * A name that resolves to no organisation *in scope* is dropped rather than
@@ -515,7 +530,19 @@ function defaultCustomer(namesInScope) {
   const byUuid = state.customerUuid
     ? state.raw.customers.find((row) => row.uuid === state.customerUuid)?.name
     : null;
-  const candidates = [byUuid, state.customerName, customerFromPermissions(state.raw.me)];
+  // Through the allocations rather than `projects`, because those are what the
+  // scope is derived from in the first place: a project not among them is one
+  // this token cannot report on anyway.
+  const byProject = state.projectUuid
+    ? reports.inScope(state.raw.allocations)
+      .find((row) => row.project_uuid === state.projectUuid)?.customer_name
+    : null;
+  const candidates = [
+    byUuid,
+    byProject,
+    state.customerName,
+    customerFromPermissions(state.raw.me),
+  ];
   for (const candidate of candidates) {
     if (candidate && namesInScope.includes(candidate)) return candidate;
   }
@@ -847,6 +874,7 @@ async function boot() {
 
   state.customerUuid = context?.customerUuid ?? null;
   state.customerName = context?.customerName ?? null;
+  state.projectUuid = context?.projectUuid ?? null;
   el('api-url').value = apiUrl;
   if (apiUrl) {
     state.cache = new MonthCache(apiUrl);

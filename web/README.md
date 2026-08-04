@@ -25,7 +25,7 @@ from, and `src/portal.js` reads them out of it:
 | --- | --- | --- |
 | The API token | `localStorage`, key `waldur/auth/token` | the paste box, as before |
 | The API URL | an origin the page has fetched `/api/` from; else the favicon's origin; else the remembered resource filter; else `portal.` → `portal-api.` | a text box |
-| The organisation | the UUID in `/organizations/<uuid>/`; else the `customer`-scoped entry in `users/me/`; else the largest in scope | the picker, which is always there |
+| The organisation | the UUID in `/organizations/<uuid>/`; else the owner of the project in `/projects/<uuid>/`, through the allocations; else the remembered filter; else the `customer`-scoped entry in `users/me/`; else the largest in scope | the picker, which is always there |
 
 The organisation one is the point. **No institution is named anywhere in this
 source.** An RSE at any partner opens *their* organisation's dashboard, presses

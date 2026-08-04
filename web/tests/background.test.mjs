@@ -141,6 +141,22 @@ describe('the ordinary path', () => {
     assert.equal(context.customerUuid, '0123456789abcdef0123456789abcdef');
   });
 
+  it('carries the project UUID over from a project page', async () => {
+    // A `/projects/<uuid>/` page names no organisation, so the handover has to
+    // deliver the project and let the report resolve it through the
+    // allocations. Dropping it here would silently give an administrator of a
+    // separately funded project somebody else's report.
+    const project = 'https://portal.example.test/projects/aaaa1111bbbb2222cccc3333dddd4444/';
+    world.tabs = [{ id: 1, url: project, active: true }];
+    world.readings = { href: project, origin: 'https://portal.example.test', token: 'a-token' };
+    world.created = [];
+    await on.clicked();
+
+    const context = await ask(world.created.at(-1).id);
+    assert.equal(context.projectUuid, 'aaaa1111bbbb2222cccc3333dddd4444');
+    assert.equal(context.customerUuid, null, 'a project page names no organisation');
+  });
+
   it('hands the context over exactly once', async () => {
     // The readings carry a token. Holding one after it has been delivered buys
     // nothing, so a second ask — a reload, say — gets nothing and falls back.
