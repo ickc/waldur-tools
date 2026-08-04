@@ -1,0 +1,56 @@
+name: Release the extension
+
+# The repository holds two shippable things on separate version lines -- this
+# package and the browser extension -- so the extension's tags are prefixed.
+# `v*` stays free for the Python package.
+on:
+  push:
+    tags: ["web-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Before anything slow. `manifest.json` is the only place the version is
+      # written down, and a tag that disagrees with it would publish an asset
+      # whose name and whose extension report different versions.
+      - name: The tag has to name the version in the manifest
+        run: |
+          manifest=$(jq -r .version web/manifest.json)
+          tag=${GITHUB_REF_NAME#web-v}
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME says $tag, web/manifest.json says $manifest"
+            exit 1
+          fi
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+
+      # A tag can be pushed at a commit that never went through CI, so the whole
+      # suite runs again here rather than being assumed. `check` covers the
+      # parity test, which is what pins the extension's arithmetic to this
+      # package's -- the one thing that must not ship wrong.
+      - name: Check
+        run: pixi run check
+
+      # Depends on `web-vendor`, so the plotly bundle is written before the
+      # archive is. `pixi.lock` is committed, so it is the same bundle any
+      # checkout vendors and the same one `waldur-tools viz` inlines.
+      - name: Pack
+        run: pixi run web-pack
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --verify-tag \
+            --title "Isambard 3 utilisation ${GITHUB_REF_NAME#web-}" \
+            --notes "$(cat .github/install-notes.md)" \
+            --generate-notes

@@ -5,12 +5,21 @@ A browser extension that builds the same utilisation report as
 install of this package, no Python, no snapshot — for the people who want the
 answer without the toolchain.
 
+**To use it**, take the zip from the [latest
+release](../../../releases?q=web&expanded=true), unpack it, and load the
+unpacked folder — `chrome://extensions` → *Developer mode* → *Load unpacked*.
+Chrome cannot install a zip directly, which is why it has to be unpacked first.
+The plotly bundle is already inside, so this needs neither Python nor a
+checkout.
+
+**To work on it**, load `web/` from a checkout instead, after writing the one
+file that is generated rather than committed:
+
 ```bash
 pixi run web-vendor      # writes web/vendor/plotly.min.js, once
 ```
 
-Then load `web/` as an unpacked extension — `chrome://extensions` →
-*Developer mode* → *Load unpacked*.
+`pixi run web-pack` builds the release zip out of the same tree, into `dist/`.
 
 **Open your organisation's dashboard in the portal and press the toolbar
 button.** That is the whole interaction. The report opens in a new tab and

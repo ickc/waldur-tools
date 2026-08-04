@@ -905,3 +905,46 @@ and no amount of checking a spec object catches a title that renders as
 "…month by mon|". It is now pinned left in container coordinates with a top
 margin deep enough for two bands, and there is a test for that — but the test
 was written after the browser found it, which is the point.
+
+## Releasing the extension
+
+The extension ships as a zip on a GitHub release, built by
+`.github/workflows/release.yml` when a `web-v*` tag is pushed.
+
+```bash
+# edit "version" in web/manifest.json, commit it
+git tag web-v0.3.0
+git push origin web-v0.3.0
+```
+
+The tag is prefixed because this repository has two shippable things on
+separate version lines, and an unprefixed `v0.3.0` would silently claim to be
+this package's release too.
+
+`web/manifest.json` is the only place the extension's version is written down.
+The workflow reads it, refuses a tag that disagrees, and names the asset from
+it — so the archive's name and the version the extension reports about itself
+cannot come apart. A tag can be pushed at a commit that never went through CI,
+so the workflow runs `pixi run check` in full before it packs anything.
+
+`pixi run web-pack` is the same command the workflow runs, so the archive can
+be built and inspected locally before tagging. It depends on `web-vendor`,
+which is the whole reason it is a task rather than shell in the YAML: the
+plotly bundle is generated and not committed, and an archive built without it
+would be an extension that loads and then cannot draw. `pixi.lock` is
+committed, so CI vendors the same bundle a checkout does. Entries are written
+sorted and with a fixed timestamp, so the same source produces the same bytes
+and two builds can be compared.
+
+What goes in is what Chrome loads, plus the README: the tests, their golden
+fixtures and the `package.json` that marks `src/` as ES modules for node all
+stay out. Paths inside are relative to `web/`, because Chrome wants
+`manifest.json` at the root of what it loads.
+
+**A downloaded zip is not installable as it stands** — Chrome only takes an
+unpacked folder outside the Web Store, so the release notes say to unpack it
+first. Publishing to the Chrome Web Store later would not change any of this:
+the same archive is what the store takes, uploadable from this workflow with an
+API key. Self-hosting a signed CRX with an `update_url` would buy auto-update,
+but Chrome refuses non-store extensions on Windows and ChromeOS, which is most
+of the audience.

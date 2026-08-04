@@ -86,6 +86,10 @@ typecheck = "mypy src"
 # regenerates the golden files it reads.
 web-vendor = { cmd = "python scripts/vendor_plotly.py" }
 test-web = { cmd = "node --test 'web/tests/*.test.mjs'", depends-on = ["test"] }
+# Writes the release asset into dist/. The plotly bundle is generated and not
+# committed, so packing depends on vendoring it -- an archive built without it
+# would be an extension that cannot draw.
+web-pack = { cmd = "python scripts/pack_web.py", depends-on = ["web-vendor"] }
 
 check = { depends-on = ["lint", "typecheck", "test", "test-web"] }
 
