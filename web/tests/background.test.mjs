@@ -24,6 +24,26 @@ import { before, describe, it } from 'node:test';
 const PORTAL = 'https://portal.example.test/organizations/'
   + '0123456789abcdef0123456789abcdef/dashboard/';
 
+/**
+ * A portal on the host the manifest grants outright.
+ *
+ * `findPortalTab` reaches for an already-open tab with a URL filter, and
+ * `tabs.query` may only see a URL the extension holds a host permission for --
+ * so that filter names the deployment in `host_permissions` and can name
+ * nothing else without asking for the `tabs` permission over every site. The
+ * active-tab path has no such limit: `activeTab` covers whichever tab the
+ * button was pressed from, whatever its host, which is why `PORTAL` above is a
+ * fabricated hostname and this one is not.
+ */
+const GRANTED = 'https://portal.isambard.ac.uk/organizations/'
+  + '0123456789abcdef0123456789abcdef/dashboard/';
+
+/** Chrome's match patterns, enough of them for the one filter under test. */
+function matches(pattern, url) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`).test(url ?? '');
+}
+
 /** Captured listeners, filled when `background.js` is imported. */
 const on = { clicked: null, message: null, removed: null };
 
@@ -48,10 +68,15 @@ function fakeChrome() {
     },
     tabs: {
       onRemoved: { addListener: (fn) => { on.removed = fn; } },
-      query: async (filter) => {
-        if (filter.active) return world.tabs.filter((tab) => tab.active);
-        return world.tabs.filter((tab) => tab.url?.startsWith('https://portal.'));
-      },
+      // `filter.url` is honoured rather than approximated: the real API returns
+      // nothing for a host the extension may not see, and a stub that answers
+      // anyway would hide the fact that the open-tab fallback reaches exactly
+      // one deployment.
+      query: async (filter) => world.tabs.filter((tab) => {
+        if (filter.active && !tab.active) return false;
+        if (filter.url && !matches(filter.url, tab.url)) return false;
+        return true;
+      }),
       create: async ({ url }) => {
         const tab = { id: world.nextTabId, url, active: true };
         world.nextTabId += 1;
@@ -145,13 +170,31 @@ describe('the ordinary path', () => {
     // has the report open, and refusing it would be a needless dead end.
     world.tabs = [
       { id: 7, url: 'https://example.test/somewhere', active: true },
+      { id: 8, url: GRANTED, active: false },
+    ];
+    world.readings = { href: GRANTED, origin: 'https://portal.isambard.ac.uk', token: 'x' };
+    world.scripted = [];
+    world.created = [];
+    await on.clicked();
+    assert.deepEqual(world.scripted, [8]);
+  });
+
+  it('does not find an open portal on a host the manifest does not grant', async () => {
+    // The limit of the fallback, asserted rather than left to be discovered:
+    // `tabs.query` cannot see a URL the extension holds no permission for, so
+    // another deployment has to be the *active* tab, where `activeTab` covers
+    // it. Reaching further would mean the `tabs` permission over every site,
+    // which is a much larger thing to ask for than this fallback is worth.
+    world.tabs = [
+      { id: 7, url: 'https://example.test/somewhere', active: true },
       { id: 8, url: PORTAL, active: false },
     ];
     world.readings = { href: PORTAL, origin: 'https://portal.example.test', token: 'x' };
     world.scripted = [];
     world.created = [];
     await on.clicked();
-    assert.deepEqual(world.scripted, [8]);
+    assert.deepEqual(world.scripted, [], 'nothing was scripted');
+    assert.equal(world.created.length, 1, 'the report still opened, to its paste form');
   });
 });
 
