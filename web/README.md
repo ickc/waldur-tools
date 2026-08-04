@@ -324,6 +324,21 @@ Nothing to configure for another *organisation* on this deployment — that is t
 whole design above. For another *deployment*, the API URL is inferred from
 whatever portal you press the button on, and `activeTab` covers reading that tab
 whichever host it is. The API host itself is covered by
-`optional_host_permissions`, which the extension asks for the first time it
-needs it, so it stays useful against a second deployment without claiming access
-to every site at install time.
+`optional_host_permissions`, so the extension stays useful against a second
+deployment without claiming access to every site at install time.
+
+That permission can only be *asked for* from a click, and the automatic path is
+not one — a `permissions.request` on page load is refused. So the first visit to
+another deployment stops at the gate, with the token filled in and the reason on
+it, and pressing its button raises the prompt. One click, once: afterwards the
+permission is held and the automatic path runs, token re-read from the tab and
+401s retried as usual. The one loss is that the first build goes through the
+paste path, which cannot renew an expired token; a reload after granting picks
+the automatic path back up.
+
+The open-tab fallback is narrower than this and stays so. `tabs.query` can only
+see URLs the extension holds a permission for, and `host_permissions` names one
+deployment — so on another Waldur the portal has to be the *active* tab, which
+`activeTab` covers. Reaching an already-open tab on any host would mean the
+`tabs` permission over every site, which is far more than the convenience is
+worth.

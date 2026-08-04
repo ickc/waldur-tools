@@ -587,6 +587,26 @@ const session = {
  * keeps the extension useful against a second deployment without it claiming
  * access to every site at install time.
  */
+/**
+ * Whether the extension already holds permission for this API host.
+ *
+ * Separate from `grantHost` because *asking* has to happen inside a click and
+ * `boot()` is not one: a `permissions.request` on page load is refused by
+ * Chrome. So the automatic path can only check, and hand a host it does not
+ * hold to the gate, where the reader's own click carries the gesture.
+ *
+ * True on anything that throws, for the same reason `grantHost` returns true:
+ * outside an extension there is no permission to hold, and the fetch itself
+ * gives the honest error.
+ */
+async function hasHost(apiUrl) {
+  try {
+    return await chrome.permissions.contains({ origins: [`${new URL(apiUrl).origin}/*`] });
+  } catch {
+    return true;
+  }
+}
+
 async function grantHost(apiUrl) {
   let origin;
   try {
@@ -836,6 +856,20 @@ async function boot() {
         'The portal tab was read, but its API URL could not be worked out from it — ' +
           'the hostname follows no convention this knows. Give the API URL and press ' +
           'Build report.',
+      );
+      return;
+    }
+    if (!(await hasHost(apiUrl))) {
+      // Another deployment, first visit. The manifest grants this one outright
+      // and covers the rest with `optional_host_permissions`, which can only be
+      // requested from a click -- so the gate is the route, and pressing its
+      // button raises the prompt. Without this the reader would meet a blocked
+      // cross-origin fetch and no explanation, on the very path the README
+      // advertises for pointing this at another Waldur.
+      el('token').value = context.token;
+      showGate(
+        `Reading ${apiUrl} needs permission for that host, which can only be asked ` +
+          'for from a button. Press Build report to be asked.',
       );
       return;
     }
