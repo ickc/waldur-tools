@@ -51,6 +51,14 @@ the API before anything is built, and one the portal rejects falls back to the
 paste box with the reason on it — the same box, demoted from front door to
 fallback. The portal's account menu still offers *Copy API token* for that path.
 
+**A token read off a portal tab goes only to an API URL inferred from that same
+tab.** The URL box carries this deployment's address as its default, and the
+inference answers null rather than guessing at a hostname it does not
+recognise — so falling back to that default would take one deployment's
+credential and send it to another. When the URL cannot be worked out the gate
+appears instead, with the token filled in and the URL blank, and the reader says
+where it goes.
+
 Reading it needs `activeTab` and `scripting`, plus a host permission for the
 portal front end so a portal tab that is merely *open* can be read too — the
 button then works from any tab, not only from the portal. `background.js` holds

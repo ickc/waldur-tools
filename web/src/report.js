@@ -523,6 +523,9 @@ function defaultCustomer(namesInScope) {
 }
 
 async function showCacheNote() {
+  // Null until an API URL is known: the cache is keyed by it, so there is
+  // nothing to count yet and nothing to say.
+  if (!state.cache) return;
   const summary = await state.cache.summary();
   el('cache-note').textContent = summary.months
     ? `${summary.months} complete months (${format(summary.rows, 0)} rows) are cached ` +
@@ -669,6 +672,9 @@ async function start() {
   const apiUrl = el('api-url').value.trim();
 
   if (!token) return gateError('Paste a portal API token to continue.');
+  // Blank when the portal tab offered a token but no URL to send it to, which
+  // is the one case this box is not prefilled for.
+  if (!apiUrl) return gateError('Give the API URL of the portal this token belongs to.');
 
   // The manifest grants the Isambard portal outright; any other deployment has
   // to be asked for, and asking has to happen inside the click that triggered
@@ -752,7 +758,7 @@ el('refresh').addEventListener('click', async () => {
 });
 
 el('forget').addEventListener('click', async () => {
-  await state.cache.clearAll();
+  if (state.cache) await state.cache.clearAll();
   await session.clear();
   await showCacheNote();
   el('forget').textContent = 'Cached data cleared';
@@ -801,17 +807,38 @@ if (plotlyMissing) {
  */
 async function boot() {
   const context = await handover();
-  const apiUrl = context?.apiUrl ?? el('api-url').value.trim();
+
+  // **A token read off a portal tab goes only to an API URL inferred from that
+  // same tab.** The box's default is this deployment's, and `portal.js` answers
+  // null rather than guessing at a hostname it does not recognise -- so falling
+  // back to the default here would take another deployment's credential and
+  // send it to this one. The reader supplies the URL instead, and knows they
+  // did.
+  const apiUrl = context?.apiUrl ?? (context?.token ? '' : el('api-url').value.trim());
 
   state.customerUuid = context?.customerUuid ?? null;
   state.customerName = context?.customerName ?? null;
   el('api-url').value = apiUrl;
-  state.cache = new MonthCache(apiUrl);
-  await showCacheNote();
+  if (apiUrl) {
+    state.cache = new MonthCache(apiUrl);
+    await showCacheNote();
+  }
 
   if (plotlyMissing) return;
 
   if (context?.token) {
+    if (!apiUrl) {
+      // The token is offered rather than the reader being sent back to the
+      // account menu for it: it is theirs, off the tab they pressed the button
+      // on, and only where to send it is in doubt.
+      el('token').value = context.token;
+      showGate(
+        'The portal tab was read, but its API URL could not be worked out from it — ' +
+          'the hostname follows no convention this knows. Give the API URL and press ' +
+          'Build report.',
+      );
+      return;
+    }
     await build({ token: context.token, apiUrl, fromPortal: true });
     return;
   }
