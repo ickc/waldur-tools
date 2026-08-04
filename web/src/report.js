@@ -674,7 +674,12 @@ async function build({ token, apiUrl, fromPortal }) {
   } catch (error) {
     state.loading = false;
     progress(null);
-    if (el('report').hidden) showGate(error.message);
+    // `state.headRendered`, not `#report.hidden`: `run()` unhides the report
+    // before its first request, so the shell is always visible by the time
+    // anything can throw. What decides this is whether the reader has something
+    // to read -- a failure in the first wave leaves an empty page whose only
+    // useful control, the token box, is on the gate.
+    if (!state.headRendered) showGate(error.message);
     else {
       showError(
         error instanceof WaldurError ? 'The portal pull did not complete' : 'Something broke',
@@ -721,6 +726,10 @@ async function start() {
  */
 function showGate(why) {
   el('starting').hidden = true;
+  // The inverse of what `run()` does on the way in. A half-built report left
+  // behind the gate is a page with two headings and no reader who can tell
+  // which one is current.
+  el('report').hidden = true;
   el('gate').hidden = false;
   if (why) el('gate-why').textContent = why;
   if (state.apiUrl) el('api-url').value = state.apiUrl;
