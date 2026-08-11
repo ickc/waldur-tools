@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 from datetime import date
 from typing import TYPE_CHECKING
 
 import polars as pl
 
-from .cache import load
+from .cache import SnapshotError, load
 from .frames import integral, numeric
 
 if TYPE_CHECKING:
@@ -894,6 +895,308 @@ def queue(source: Snapshot | WaldurClient) -> pl.DataFrame:
     )
 
 
+#: Binary multipliers for the sizes the storage collector writes. Its "GB" is a
+#: GiB: it reports ``"100.00 GB"`` for the same home quota ``lfs quota -h``
+#: calls ``100G``, and a 1000-based reading of that figure would be 93.13 GiB.
+#: Only the absolute views depend on the choice -- ``fill_pct`` divides two
+#: figures carrying the same unit, so it is base-independent either way.
+_SIZE_UNITS = {
+    "B": 1,
+    "KB": 1024**1,
+    "MB": 1024**2,
+    "GB": 1024**3,
+    "TB": 1024**4,
+    "PB": 1024**5,
+}
+
+_SIZE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([KMGTP]?B)\s*$", re.IGNORECASE)
+
+#: The filesystems the collector reports a project-wide quota for, as opposed to
+#: a per-user one. Everything else in ``user_quotas`` is charged to a person.
+PROJECT_FILESYSTEMS = ("projects",)
+
+_STORAGE_SCHEMA = {
+    "observed_at": pl.String,
+    "date": pl.Date,
+    "month": pl.Date,
+    "kind": pl.String,
+    "project_code": pl.String,
+    "username": pl.String,
+    "filesystem": pl.String,
+    "usage_bytes": pl.Float64,
+    "limit_bytes": pl.Float64,
+    "fill_pct": pl.Float64,
+}
+
+
+def _size_bytes(text: object) -> float | None:
+    """``"1.50 TB"`` as a number of bytes, or ``None`` if it is not a size.
+
+    Returns ``None`` rather than raising. This parses a free-form field inside
+    a free-form blob, and one unrecognised string should blank one cell rather
+    than take down the whole report.
+    """
+    if not isinstance(text, str):
+        return None
+    match = _SIZE.match(text)
+    if match is None:
+        return None
+    return float(match.group(1)) * _SIZE_UNITS[match.group(2).upper()]
+
+
+def humanise_bytes(value: object) -> str:
+    """A byte count written the way the collector wrote it: ``"46.79 GB"``.
+
+    The inverse of :func:`_size_bytes`, and the only place the 1024-based
+    convention is spelled out for display -- the CLI table and the figure
+    hovers both come here rather than each rounding in their own direction.
+    """
+    if not isinstance(value, int | float):
+        return ""
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size) < 1024 or unit == "TB":
+            return f"{size:,.0f} B" if unit == "B" else f"{size:,.2f} {unit}"
+        size /= 1024
+    return f"{size:,.2f} PB"
+
+
+def storage_samples(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFrame:
+    """Every quota reading in the snapshot, one row per scope, filesystem and sample.
+
+    ``openportal-project-storage-reports`` returns one row per project, resource
+    and month, with a ``report`` blob holding quota readings. Like :func:`queue`
+    this reshapes rather than selects, and it is the frame both storage reports
+    and both storage figures are built from.
+
+    **Two shapes share the blob.** A finished month carries ``daily_reports``,
+    a dictionary keyed by date; the month still in progress carries no such
+    dictionary at all, only the top-level snapshot. Both are read here, which
+    matters twice over: the top-level snapshot of a finished month is taken
+    *after* its last daily entry, so reading it recovers a final day the daily
+    dictionary alone would lose, and it is the only reading the open month has.
+
+    **A day can be sampled more than once.** The same filesystem is reported
+    under each ``resource`` the project holds, by collectors that run minutes
+    apart, so two readings of one day legitimately disagree by whatever was
+    written in between. They are kept as separate samples rather than
+    deduplicated: storage is a property of the filesystem and not of the
+    cluster, so these are repeat measurements of one quantity, and letting the
+    monthly aggregation see all of them is what makes ``peak`` honest.
+
+    ``fill_pct`` is ``usage_bytes`` over ``limit_bytes``, the only figure that
+    compares across filesystems whose limits differ by two orders of magnitude.
+    It is null where the limit is missing or zero rather than dividing by it.
+    """
+    # Snapshots taken before storage was pulled simply do not have the file,
+    # and every caller here degrades to "no storage figures" rather than
+    # failing -- re-snapshotting is a nine-minute job to ask of someone who
+    # only wanted the node hours.
+    try:
+        frame = load(source, ["openportal-project-storage-reports"])[
+            "openportal-project-storage-reports"
+        ]
+    except SnapshotError:
+        return pl.DataFrame(schema=_STORAGE_SCHEMA)
+    if frame.is_empty():
+        return pl.DataFrame(schema=_STORAGE_SCHEMA)
+
+    rows: list[dict[str, object]] = []
+    for record in frame.iter_rows(named=True):
+        payload = record.get("report")
+        if isinstance(payload, str):
+            payload = json.loads(payload) if payload else {}
+        if not isinstance(payload, dict):
+            continue
+
+        year, month = record.get("year"), record.get("month")
+        stamp = f"{year}-{month:02d}" if year and month else None
+        readings = [*(payload.get("daily_reports") or {}).items(), (None, payload)]
+        for day, reading in readings:
+            if not isinstance(reading, dict):
+                continue
+            observed = reading.get("generated_at") or ""
+            when = day or observed[:10]
+            # The row's own year and month are what the API says it describes;
+            # a reading dated outside them would put a day in the wrong column.
+            if not when or (stamp and when[:7] != stamp):
+                continue
+
+            identifier = reading.get("project") or record.get("project_identifier") or ""
+            code = identifier.split(".")[0] or None
+
+            for filesystem, quota in (reading.get("project_quotas") or {}).items():
+                rows.append(_storage_row(observed, when, "project", code, None, filesystem, quota))
+            for who, quotas in (reading.get("user_quotas") or {}).items():
+                parts = who.split(".")
+                for filesystem, quota in (quotas or {}).items():
+                    rows.append(
+                        _storage_row(observed, when, "user", code, parts[0], filesystem, quota)
+                    )
+
+    if not rows:
+        return pl.DataFrame(schema=_STORAGE_SCHEMA)
+
+    samples = (
+        pl.DataFrame(rows)
+        .with_columns(pl.col("date").str.to_date(strict=False))
+        .with_columns(month=pl.col("date").dt.truncate("1mo"))
+        .with_columns(
+            fill_pct=pl.when(pl.col("limit_bytes") > 0)
+            .then(100 * pl.col("usage_bytes") / pl.col("limit_bytes"))
+            .otherwise(None)
+        )
+        .drop_nulls("date")
+        .select(list(_STORAGE_SCHEMA))
+        .sort("observed_at", "kind", "project_code", "username", "filesystem")
+    )
+    if scope:
+        codes = in_scope(source)["project_code"].to_list()
+        samples = samples.filter(pl.col("project_code").is_in(codes))
+    return samples
+
+
+def _storage_row(
+    observed: str,
+    when: str,
+    kind: str,
+    code: str | None,
+    username: str | None,
+    filesystem: str,
+    quota: object,
+) -> dict[str, object]:
+    """One reading, with both sizes already in bytes."""
+    quota = quota if isinstance(quota, dict) else {}
+    return {
+        "observed_at": observed,
+        "date": when,
+        "kind": kind,
+        "project_code": code,
+        "username": username,
+        "filesystem": filesystem,
+        "usage_bytes": _size_bytes(quota.get("usage")),
+        "limit_bytes": _size_bytes(quota.get("limit")),
+    }
+
+
+def storage(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFrame:
+    """How full every quota was when it was last read, fullest first.
+
+    The current-state view, and the one the terminal is good at: one row per
+    project or person per filesystem, carrying the most recent reading of it.
+    Sorted by ``fill_pct`` descending, so the answer to "who is about to run
+    out" is the top of the table rather than something to be searched for.
+
+    ``observed_at`` is part of the answer rather than decoration. These
+    readings are only as current as the collector behind them, which is not
+    the same thing as how fresh the snapshot is, and a row whose reading is
+    months old should be read as history rather than as the state of the disk.
+    """
+    samples = storage_samples(source, scope=scope)
+    if samples.is_empty():
+        return samples.drop("month")
+    keys = ["kind", "project_code", "username", "filesystem"]
+    return (
+        samples.sort("observed_at")
+        .group_by(keys, maintain_order=False)
+        .agg(pl.col("observed_at", "date", "usage_bytes", "limit_bytes", "fill_pct").last())
+        .select(
+            "kind",
+            "project_code",
+            "username",
+            "filesystem",
+            "usage_bytes",
+            "limit_bytes",
+            "fill_pct",
+            "date",
+        )
+        .sort(
+            "fill_pct",
+            "kind",
+            "project_code",
+            "username",
+            descending=[True, False, False, False],
+        )
+    )
+
+
+def storage_monthly(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFrame:
+    """Each quota reduced to one row per month, for the storage heatmaps.
+
+    Disk usage is a *level*, not a flow: unlike node hours there is nothing to
+    sum, and a month has to be summarised by choosing a statistic rather than
+    by adding one up. Three are offered, and which one is right depends on the
+    question:
+
+    ``peak``
+        The fullest the quota got. The one that decides whether writes failed,
+        and the default everywhere in this package.
+    ``end``
+        The last reading of the month, which is the level carried into the
+        next one.
+    ``median``
+        The typical level, robust to a single day's spike.
+
+    A mean is deliberately absent. Averaging a slowly drifting level is close
+    to meaningless -- it is the mean of a random walk -- and it hides the peak,
+    which is the part that actually breaks jobs; the median covers the same
+    "ignore one bad day" ground without that.
+
+    ``is_partial`` means *fewer daily readings than the month has days*, which
+    is a different claim from the ``is_partial`` of :func:`monthly_totals` --
+    there it marks the month the snapshot was taken in. Storage readings lag
+    their own collector, so freshness here cannot be derived from the snapshot
+    date, and a month can be short of readings at either end: collection
+    starting mid-month, stopping mid-month, or simply missing a day.
+    """
+    samples = storage_samples(source, scope=scope)
+    if samples.is_empty():
+        return pl.DataFrame(
+            schema={
+                "month": pl.Date,
+                "kind": pl.String,
+                "project_code": pl.String,
+                "username": pl.String,
+                "filesystem": pl.String,
+                "peak_fill_pct": pl.Float64,
+                "end_fill_pct": pl.Float64,
+                "median_fill_pct": pl.Float64,
+                "peak_bytes": pl.Float64,
+                "end_bytes": pl.Float64,
+                "median_bytes": pl.Float64,
+                "limit_bytes": pl.Float64,
+                "days_observed": pl.Int64,
+                "samples": pl.Int64,
+                "is_partial": pl.Boolean,
+            }
+        )
+
+    keys = ["month", "kind", "project_code", "username", "filesystem"]
+    return (
+        samples.sort("observed_at")
+        .group_by(keys, maintain_order=False)
+        .agg(
+            peak_fill_pct=pl.col("fill_pct").max(),
+            end_fill_pct=pl.col("fill_pct").last(),
+            median_fill_pct=pl.col("fill_pct").median(),
+            peak_bytes=pl.col("usage_bytes").max(),
+            end_bytes=pl.col("usage_bytes").last(),
+            median_bytes=pl.col("usage_bytes").median(),
+            limit_bytes=pl.col("limit_bytes").last(),
+            days_observed=pl.col("date").n_unique().cast(pl.Int64),
+            samples=pl.len().cast(pl.Int64),
+        )
+        .with_columns(
+            is_partial=pl.col("days_observed")
+            < pl.col("month").map_elements(
+                lambda when: calendar.monthrange(when.year, when.month)[1],
+                return_dtype=pl.Int64,
+            )
+        )
+        .sort("month", "kind", "project_code", "username", "filesystem")
+    )
+
+
 #: Report name -> callable, for the CLI and for discovery.
 REPORTS = {
     "credits": credits,
@@ -905,7 +1208,18 @@ REPORTS = {
     "reconcile": reconcile,
     "user-usage": user_usage,
     "queue": queue,
+    "storage": storage,
+    "storage-monthly": storage_monthly,
 }
 
 #: Reports whose signature accepts ``scope=``, so the CLI can offer ``--all``.
-SCOPED = {"allocations", "membership", "user-usage", "monthly", "monthly-totals", "reconcile"}
+SCOPED = {
+    "allocations",
+    "membership",
+    "user-usage",
+    "monthly",
+    "monthly-totals",
+    "reconcile",
+    "storage",
+    "storage-monthly",
+}

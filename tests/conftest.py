@@ -354,3 +354,159 @@ def usage_reports():
             },
         }
     ]
+
+
+def _quotas(project, alice_home, alice_scratch, bob_home, stamp):
+    """One reading: the project's own quota plus two people's, at one instant."""
+    return {
+        "generated_at": stamp,
+        "project": "abc1.brics",
+        "project_quotas": {"projects": {"limit": "20.00 TB", "usage": project}},
+        "user_quotas": {
+            "alice.abc1.brics": {
+                "home": {"limit": "100.00 GB", "usage": alice_home},
+                "scratch": {"limit": "5.00 TB", "usage": alice_scratch},
+            },
+            "bob.abc1.brics": {"home": {"limit": "100.00 GB", "usage": bob_home}},
+        },
+    }
+
+
+@pytest.fixture
+def storage_reports():
+    """Quota readings shaped like the collector's, with its awkward parts kept.
+
+    Every figure in the fixture is invented. What is *not* invented is the
+    shape, and each row below is here because the parsing has to survive it:
+
+    - A finished month (January) carrying ``daily_reports`` **and** a top-level
+      snapshot dated after the last of them, which is the only way the last day
+      of a month is ever reported.
+    - The month in progress (February) carrying the snapshot alone, with no
+      ``daily_reports`` key at all.
+    - The same project-day reported twice under two ``resource`` values, by
+      collectors minutes apart and disagreeing slightly, because storage
+      belongs to the filesystem rather than to the cluster.
+    - A quota whose limit is not a size, so the fill percentage has a null to
+      carry rather than a division by zero.
+    - A reading dated outside the month its row claims, which must be dropped
+      rather than filed under the wrong column.
+    - A project this token does not administer, for ``scope`` to remove.
+    """
+    return [
+        {
+            "id": 1,
+            "year": 2025,
+            "month": 1,
+            "project_identifier": "abc1.brics",
+            "resource": "brics.i3.clusters.macs",
+            "report": {
+                **_quotas(
+                    "3.00 TB",
+                    "30.00 GB",
+                    "700.00 GB",
+                    "95.00 GB",
+                    "2025-01-31T10:00:00.000000000Z",
+                ),
+                "daily_reports": {
+                    "2025-01-29": _quotas(
+                        "1.00 TB",
+                        "10.00 GB",
+                        "500.00 GB",
+                        "80.00 GB",
+                        "2025-01-29T10:00:00.000000000Z",
+                    ),
+                    "2025-01-30": _quotas(
+                        "2.00 TB",
+                        "20.00 GB",
+                        "600.00 GB",
+                        "90.00 GB",
+                        "2025-01-30T10:00:00.000000000Z",
+                    ),
+                },
+            },
+        },
+        {
+            "id": 2,
+            "year": 2025,
+            "month": 1,
+            "project_identifier": "abc1.brics",
+            "resource": "brics.i3.clusters.shared",
+            "report": {
+                **_quotas(
+                    "3.10 TB",
+                    "31.00 GB",
+                    "710.00 GB",
+                    "96.00 GB",
+                    "2025-01-31T10:15:00.000000000Z",
+                ),
+                "daily_reports": {
+                    "2025-01-29": _quotas(
+                        "1.10 TB",
+                        "11.00 GB",
+                        "510.00 GB",
+                        "81.00 GB",
+                        "2025-01-29T10:15:00.000000000Z",
+                    ),
+                    "2025-01-30": _quotas(
+                        "2.10 TB",
+                        "21.00 GB",
+                        "610.00 GB",
+                        "91.00 GB",
+                        "2025-01-30T10:15:00.000000000Z",
+                    ),
+                },
+            },
+        },
+        {
+            "id": 3,
+            "year": 2026,
+            "month": 2,
+            "project_identifier": "abc1.brics",
+            "resource": "brics.i3.clusters.macs",
+            "report": _quotas(
+                "4.00 TB",
+                "40.00 GB",
+                "800.00 GB",
+                "97.00 GB",
+                "2026-02-18T10:00:00.000000000Z",
+            ),
+        },
+        {
+            "id": 4,
+            "year": 2025,
+            "month": 1,
+            "project_identifier": "abc2.brics",
+            "resource": "brics.i3.clusters.macs",
+            "report": {
+                "generated_at": "2025-01-31T11:00:00.000000000Z",
+                "project": "abc2.brics",
+                "project_quotas": {"projects": {"limit": "unlimited", "usage": "1.00 TB"}},
+                "user_quotas": {},
+                "daily_reports": {
+                    # February in a January row: dropped rather than filed wrong.
+                    "2025-02-01": {
+                        "generated_at": "2025-02-01T11:00:00.000000000Z",
+                        "project": "abc2.brics",
+                        "project_quotas": {"projects": {"limit": "20.00 TB", "usage": "9.00 TB"}},
+                        "user_quotas": {},
+                    },
+                },
+            },
+        },
+        {
+            "id": 5,
+            "year": 2025,
+            "month": 1,
+            "project_identifier": "zzz9.brics",
+            "resource": "brics.i3.clusters.macs",
+            "report": {
+                "generated_at": "2025-01-31T12:00:00.000000000Z",
+                "project": "zzz9.brics",
+                "project_quotas": {"projects": {"limit": "20.00 TB", "usage": "19.00 TB"}},
+                "user_quotas": {
+                    "carol.zzz9.brics": {"home": {"limit": "100.00 GB", "usage": "99.00 GB"}}
+                },
+            },
+        },
+    ]

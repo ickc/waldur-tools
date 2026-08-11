@@ -16,7 +16,14 @@ from . import viz as viz_report
 from .cache import DEFAULT_ENDPOINTS, Snapshot, SnapshotError, available, pull
 from .client import WaldurClient, WaldurError
 from .config import MissingTokenError, Settings
-from .reports import DEFAULT_CUSTOMER, DEFAULT_SHARE, REPORTS, SCOPED, TOTAL_NODES
+from .reports import (
+    DEFAULT_CUSTOMER,
+    DEFAULT_SHARE,
+    REPORTS,
+    SCOPED,
+    TOTAL_NODES,
+    humanise_bytes,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -38,8 +45,16 @@ def _render(frame: pl.DataFrame, title: str, limit: int) -> None:
     for column in shown.columns:
         numeric_column = shown.schema[column].is_numeric()
         table.add_column(column, justify="right" if numeric_column else "left")
+    # Per column, because a byte count is unreadable at full precision and the
+    # frame itself stays numeric so --sort and -o export keep working on it.
+    formatters = [_size if column.endswith("_bytes") else _fmt for column in shown.columns]
     for row in shown.iter_rows():
-        table.add_row(*("" if value is None else _fmt(value) for value in row))
+        table.add_row(
+            *(
+                "" if value is None else render(value)
+                for value, render in zip(row, formatters, strict=True)
+            )
+        )
     console.print(table)
     if shown.height < frame.height:
         console.print(
@@ -63,6 +78,15 @@ def _fmt(value: object) -> str:
     if isinstance(value, float):
         return f"{value:,.2f}"
     return str(value)
+
+
+def _size(value: object) -> str:
+    """A byte count as a size, for display only.
+
+    The frame keeps the raw number, so ``--sort`` and ``-o`` still see bytes
+    rather than a string that sorts alphabetically.
+    """
+    return humanise_bytes(value) if isinstance(value, int | float) else str(value)
 
 
 def _write(frame: pl.DataFrame, output: Path) -> None:
