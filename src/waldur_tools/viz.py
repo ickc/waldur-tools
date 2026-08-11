@@ -26,6 +26,7 @@ colours sit below 3:1 contrast and the table is their relief.
 
 from __future__ import annotations
 
+import calendar
 import html
 import json
 import math
@@ -84,6 +85,16 @@ CHROME: dict[str, tuple[str, str]] = {
 RAMP_LIGHT = ["#f0efec", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#0d366b"]
 RAMP_DARK = ["#242423", "#104281", "#184f95", "#256abf", "#3987e5", "#6da7ec", "#cde2fb"]
 
+#: Sequential ramp for the quota heatmaps, with a hot tail. Unlike node hours,
+#: a fill percentage is *bounded*: the whole decision runs from empty to full,
+#: and the top of that range is the only part anyone acts on. So the ramp
+#: leaves the blues around two thirds and finishes through amber into red,
+#: which puts the quotas about to fail in a colour nothing else on the page
+#: uses. Every hex is drawn from :data:`SERIES` or :data:`CHROME`, so the
+#: light/dark swap needs no new pairs.
+RAMP_FILL_LIGHT = ["#f0efec", "#d8e8f8", "#9ec5f4", "#6da7ec", "#eda100", "#eb6834", "#d03b3b"]
+RAMP_FILL_DARK = ["#242423", "#104281", "#256abf", "#3987e5", "#eda100", "#eb6834", "#d03b3b"]
+
 #: Violin body fill, light then dark. Translucent rather than a solid step,
 #: so overlapping density lobes stay legible; it is kept out of :data:`SERIES`
 #: because the hex-for-hex swap the theme switch performs cannot carry alpha.
@@ -100,6 +111,11 @@ FLOOR_NODE_HOURS = 0.1
 def light(role: str) -> str:
     """The light-mode hex for a chrome role."""
     return CHROME[role][0]
+
+
+def _scale(ramp: list[str]) -> list[list[Any]]:
+    """A list of hexes as an evenly stopped plotly colorscale."""
+    return [[i / (len(ramp) - 1), colour] for i, colour in enumerate(ramp)]
 
 
 def _swap_map() -> dict[str, str]:
@@ -494,7 +510,7 @@ def figure_heatmap(
             y=order,
             z=absolute,
             text=absolute_text,
-            colorscale=[[i / (len(RAMP_LIGHT) - 1), c] for i, c in enumerate(RAMP_LIGHT)],
+            colorscale=_scale(RAMP_LIGHT),
             hovertemplate="%{y}<br>%{x}: %{text}<extra></extra>",
             xgap=2,
             ygap=2,
@@ -506,7 +522,7 @@ def figure_heatmap(
                 "outlinewidth": 0,
                 "thickness": 12,
             },
-            meta={"ramp": True},
+            meta={"ramp": "activity"},
         )
     )
     buttons = (
@@ -556,6 +572,297 @@ def figure_heatmap(
         )
     )
     return figure
+
+
+#: Where the quota ramp tops out. A reading past this is drawn at the hot end
+#: rather than stretching the scale for one over-quota cell -- the hover still
+#: reports the true figure, and everything past full is equally actionable.
+FILL_CEILING = 100.0
+
+#: Colourbar ticks for the size views, in log10 bytes: 1 MiB, 1 GiB, 1 TiB.
+_SIZE_TICKS = [math.log10(1024**power) for power in (2, 3, 4)]
+
+
+def _storage_hover(row: dict[str, Any], stat: str) -> str:
+    """One cell's tooltip: how full, in what, and on how much evidence.
+
+    The size is spelled out on every cell rather than hidden behind a button.
+    That is what lets the quota figures spend their buttons on the axes that
+    change the picture -- the statistic, and for people the filesystem --
+    instead of on an absolute view that would say the same thing in a colour.
+    """
+    fill = row[f"{stat}_fill_pct"]
+    used = reports.humanise_bytes(row[f"{stat}_bytes"])
+    days = calendar.monthrange(row["month"].year, row["month"].month)[1]
+    seen = row["days_observed"]
+    coverage = f"all {days} days" if seen >= days else f"{seen} of {days} days read"
+    # Literal characters, not HTML entities: this is a plotly hover label
+    # rather than page markup, and it would show the entity verbatim.
+    if fill is None:
+        return f"{used}, no limit reported · {coverage}"
+    limit = reports.humanise_bytes(row["limit_bytes"])
+    return f"{fill:,.1f}% full — {used} of {limit} · {coverage}"
+
+
+def _storage_cells(
+    lookup: dict[tuple[str, date], dict[str, Any]],
+    order: list[str],
+    months: list[date],
+    stat: str,
+    absolute: bool,
+) -> tuple[list[list[float | None]], list[list[str]]]:
+    """The z matrix and hover text for one view of a quota heatmap."""
+    z: list[list[float | None]] = []
+    text: list[list[str]] = []
+    for key in order:
+        values: list[float | None] = []
+        labels: list[str] = []
+        for month in months:
+            row = lookup.get((key, month))
+            raw = None if row is None else row[f"{stat}_bytes" if absolute else f"{stat}_fill_pct"]
+            if row is None or raw is None:
+                values.append(None)
+                labels.append("no reading")
+                continue
+            values.append(math.log10(raw + 1) if absolute else min(raw, FILL_CEILING))
+            labels.append(_storage_hover(row, stat))
+        z.append(values)
+        text.append(labels)
+    return z, text
+
+
+def _storage_heatmap(
+    frame: pl.DataFrame,
+    *,
+    labels: dict[str, str],
+    views: list[tuple[str, str, str, bool]],
+    title: str,
+    left_margin: int,
+) -> go.Figure | None:
+    """The shared body of both quota heatmaps.
+
+    ``views`` is a flat list of ``(label, filesystem, stat, absolute)``. Flat
+    rather than two button groups because plotly's groups do not compose: a
+    second row of buttons would silently reset the first, and a control that
+    undoes another control is worse than a longer row of honest ones.
+    """
+    if frame.is_empty():
+        return None
+
+    months = sorted(frame["month"].unique().to_list())
+    # A month is short if even its best-observed quota missed days. Marked on
+    # the axis, because a column standing on one reading is not comparable
+    # with one standing on thirty and nothing else on the page would say so.
+    days_seen = frame.group_by("month").agg(seen=pl.col("days_observed").max())
+    coverage: dict[date, int] = dict(
+        zip(days_seen["month"].to_list(), days_seen["seen"].to_list(), strict=True)
+    )
+
+    def short(month: date) -> bool:
+        return coverage[month] < calendar.monthrange(month.year, month.month)[1]
+
+    ticks = [f"{month.strftime('%b %Y')}{'*' if short(month) else ''}" for month in months]
+
+    # Ascending, because plotly draws the first row at the bottom: the fullest
+    # quota -- the one worth acting on -- ends up at the top of the figure.
+    order = (
+        frame.group_by("row_key")
+        .agg(worst=pl.col("peak_fill_pct").max())
+        .sort("worst", "row_key", descending=[False, True])["row_key"]
+        .to_list()
+    )
+
+    matrices = []
+    for _, filesystem, stat, absolute in views:
+        slice_ = frame.filter(pl.col("filesystem") == filesystem)
+        lookup = {(row["row_key"], row["month"]): row for row in slice_.iter_rows(named=True)}
+        matrices.append(_storage_cells(lookup, order, months, stat, absolute))
+
+    sizes = [
+        value
+        for _, _, stat, absolute in views
+        if absolute
+        for value in frame[f"{stat}_bytes"].drop_nulls().to_list()
+    ]
+    size_range = [math.log10(min(sizes) + 1), math.log10(max(sizes) + 1)] if sizes else [0, 1]
+
+    def bar(absolute: bool) -> dict[str, Any]:
+        if absolute:
+            return {
+                "title": "Size",
+                "tickvals": _SIZE_TICKS,
+                "ticktext": ["1 MB", "1 GB", "1 TB"],
+                "zmin": size_range[0],
+                "zmax": size_range[1],
+            }
+        return {
+            "title": "% of quota",
+            "tickvals": [0, 25, 50, 75, 100],
+            "ticktext": ["0", "25%", "50%", "75%", "100%"],
+            "zmin": 0,
+            "zmax": FILL_CEILING,
+        }
+
+    first = bar(views[0][3])
+    figure = go.Figure(
+        go.Heatmap(
+            x=ticks,
+            y=[labels.get(key, key) for key in order],
+            z=matrices[0][0],
+            text=matrices[0][1],
+            zmin=first["zmin"],
+            zmax=first["zmax"],
+            colorscale=_scale(RAMP_FILL_LIGHT),
+            hovertemplate="%{y}<br>%{x}: %{text}<extra></extra>",
+            xgap=2,
+            ygap=2,
+            colorbar={
+                "title": {"text": first["title"], "font": {"color": light("ink_soft")}},
+                "tickvals": first["tickvals"],
+                "ticktext": first["ticktext"],
+                "tickfont": {"color": light("muted")},
+                "outlinewidth": 0,
+                "thickness": 12,
+            },
+            meta={"ramp": "fill"},
+        )
+    )
+
+    buttons = _buttons(
+        [label for label, *_ in views],
+        [
+            [
+                {
+                    "z": [z],
+                    "text": [text],
+                    "zmin": [bar(absolute)["zmin"]],
+                    "zmax": [bar(absolute)["zmax"]],
+                    "colorbar.title.text": bar(absolute)["title"],
+                    "colorbar.tickvals": [bar(absolute)["tickvals"]],
+                    "colorbar.ticktext": [bar(absolute)["ticktext"]],
+                },
+                {},
+            ]
+            for (_, _, _, absolute), (z, text) in zip(views, matrices, strict=True)
+        ],
+    )
+
+    figure.update_layout(
+        _layout(
+            height=170 + 26 * len(order),
+            hovermode="closest",
+            margin={"l": left_margin, "r": 30, "t": 60, "b": 60},
+            title={"text": title, "font": {"size": 16, "color": light("ink")}},
+            yaxis={
+                "linecolor": light("axis"),
+                "tickfont": {"color": light("muted")},
+                "showgrid": False,
+            },
+            updatemenus=buttons,
+        )
+    )
+    return figure
+
+
+def figure_storage_projects(monthly: pl.DataFrame) -> go.Figure | None:
+    """How full each project's shared storage got, month by month.
+
+    The project quota is one filesystem, so the buttons spend themselves on the
+    statistic and on an absolute view instead: a fill percentage answers "is
+    this about to fail", and the size view answers "how much is actually
+    there", which matters when every project carries the same limit and the
+    percentages alone cannot tell a large project from a small one.
+    """
+    if monthly.is_empty():
+        return None
+    frame = monthly.filter(
+        (pl.col("kind") == "project") & pl.col("filesystem").is_in(reports.PROJECT_FILESYSTEMS)
+    ).with_columns(row_key=pl.col("project_code"))
+    return _storage_heatmap(
+        frame,
+        labels={},
+        views=[
+            ("Peak", "projects", "peak", False),
+            ("End", "projects", "end", False),
+            ("Median", "projects", "median", False),
+            ("Peak size", "projects", "peak", True),
+            ("End size", "projects", "end", True),
+            ("Median size", "projects", "median", True),
+        ],
+        title="Project storage: how full the shared quota got, per month",
+        left_margin=140,
+    )
+
+
+def figure_storage_users(monthly: pl.DataFrame) -> go.Figure | None:
+    """How full each person's home and scratch got, month by month.
+
+    Two filesystems with limits two orders of magnitude apart, which is exactly
+    why the colour is a percentage: on a size scale every home directory would
+    read as empty next to a scratch quota, and it is the home directories that
+    fill up. The buttons carry the filesystem here rather than an absolute
+    view, since which disk is full is a different question from how full it is;
+    sizes stay on every cell's tooltip.
+    """
+    if monthly.is_empty():
+        return None
+    frame = monthly.filter(
+        (pl.col("kind") == "user") & pl.col("username").is_not_null()
+    ).with_columns(row_key=pl.col("username") + " · " + pl.col("project_code"))
+    if frame.is_empty():
+        return None
+    filesystems = sorted(frame["filesystem"].unique().to_list())
+    views = [
+        (f"{filesystem.capitalize()} {stat}", filesystem, stat, False)
+        for filesystem in filesystems
+        for stat in ("peak", "end", "median")
+    ]
+    return _storage_heatmap(
+        frame,
+        labels={},
+        views=views,
+        title="Personal storage: how full home and scratch got, per month",
+        left_margin=220,
+    )
+
+
+def _storage_staleness(current: pl.DataFrame) -> str:
+    """A warning sentence when the readings are old, and nothing when they are not.
+
+    Storage figures lag their own collector rather than the snapshot, so a page
+    pulled this morning can be showing a disk as it stood months ago. That is
+    invisible on the heatmap -- the columns simply stop -- which makes it the
+    one thing about these two figures worth saying in words.
+    """
+    newest = current["date"].max() if not current.is_empty() else None
+    if not isinstance(newest, date):
+        return ""
+    read: date = newest
+    days = (date.today() - read).days
+    if days < 45:
+        return ""
+    return (
+        f" <strong>These readings stop on {read:%-d %B %Y}</strong>, {days} days before "
+        "this page was built: the collector behind them has not reported since. Read the "
+        "columns as history rather than as the state of the disks now."
+    )
+
+
+def _storage_table(current: pl.DataFrame, columns: dict[str, str]) -> str:
+    """The current-state table under a quota figure, with sizes as sizes.
+
+    Byte counts are humanised into strings here rather than left as numbers,
+    because :func:`_table` renders a float to one decimal place and a quota in
+    bytes is fourteen digits of noise at that width.
+    """
+    if current.is_empty():
+        return ""
+    display = current.sort("fill_pct", descending=True, nulls_last=True).with_columns(
+        pl.col("usage_bytes").map_elements(reports.humanise_bytes, return_dtype=pl.String),
+        pl.col("limit_bytes").map_elements(reports.humanise_bytes, return_dtype=pl.String),
+        pl.col("date").cast(pl.String),
+    )
+    return _table(display, columns)
 
 
 def figure_totals_by_project(per_project: pl.DataFrame) -> go.Figure:
@@ -1369,7 +1676,10 @@ function paint(dark) {
     div.data.forEach((trace, index) => {
       const style = {};
       if (trace.meta && trace.meta.ramp) {
-        style.colorscale = [RAMPS[dark ? 'dark' : 'light']];
+        // Named rather than assumed: activity is one hue, the quota ramps end
+        // in red, and repainting must not swap one figure's scale for another's.
+        const ramp = RAMPS[trace.meta.ramp] || RAMPS.activity;
+        style.colorscale = [ramp[dark ? 'dark' : 'light']];
         style['colorbar.tickfont.color'] = [c.muted[i]];
         style['colorbar.title.font.color'] = [c.ink_soft[i]];
       } else {
@@ -1607,6 +1917,64 @@ def render(
         ),
     ]
 
+    storage_monthly = reports.storage_monthly(source)
+    storage_now = reports.storage(source)
+    project_quota = figure_storage_projects(storage_monthly)
+    user_quota = figure_storage_users(storage_monthly)
+    stale = _storage_staleness(storage_now)
+    if project_quota is not None:
+        figures.append(
+            (
+                project_quota,
+                "How full the project disks are",
+                "Node hours are a flow; disk is a level, so a month has to be summarised by "
+                "picking a statistic rather than by adding one up. <em>Peak</em> is the "
+                "fullest it got &mdash; the reading that decides whether writes failed, and "
+                "the default. <em>End</em> is the level carried into the next month, and "
+                "<em>median</em> is the typical level, unmoved by a single day's spike. "
+                "Colour is the percentage of the quota rather than the size, because every "
+                "project holds the same limit and only the fraction says who is in trouble; "
+                "the <em>size</em> views and every tooltip give the bytes. A month marked "
+                "<code>*</code> was not observed on every day." + stale,
+                _storage_table(
+                    storage_now.filter(pl.col("kind") == "project"),
+                    {
+                        "project_code": "Project",
+                        "filesystem": "Filesystem",
+                        "usage_bytes": "Used",
+                        "limit_bytes": "Quota",
+                        "fill_pct": "% full",
+                        "date": "Last read",
+                    },
+                ),
+            )
+        )
+    if user_quota is not None:
+        figures.append(
+            (
+                user_quota,
+                "How full people's own disks are",
+                "The same reading, per person. Home is a hundredth the size of scratch, so "
+                "the two are never comparable as sizes and the colour stays a percentage of "
+                "whichever quota the buttons select. Home is where this bites: it is small, "
+                "it is where people put things they meant to keep, and a full one stops a "
+                "job as surely as a full scratch does. Rows are ordered by the fullest that "
+                "quota ever got, so the people worth an email are at the top." + stale,
+                _storage_table(
+                    storage_now.filter(pl.col("kind") == "user"),
+                    {
+                        "username": "User",
+                        "project_code": "Project",
+                        "filesystem": "Filesystem",
+                        "usage_bytes": "Used",
+                        "limit_bytes": "Quota",
+                        "fill_pct": "% full",
+                        "date": "Last read",
+                    },
+                ),
+            )
+        )
+
     sizes = figure_job_sizes(ours) if ours is not None else None
     shape = figure_wait_by_shape(ours) if ours is not None else None
     spread = figure_wait_distribution(ours) if ours is not None else None
@@ -1738,8 +2106,8 @@ def render(
     swap = json.dumps(_swap_map())
     ramps = json.dumps(
         {
-            "light": [[i / (len(RAMP_LIGHT) - 1), c] for i, c in enumerate(RAMP_LIGHT)],
-            "dark": [[i / (len(RAMP_DARK) - 1), c] for i, c in enumerate(RAMP_DARK)],
+            "activity": {"light": _scale(RAMP_LIGHT), "dark": _scale(RAMP_DARK)},
+            "fill": {"light": _scale(RAMP_FILL_LIGHT), "dark": _scale(RAMP_FILL_DARK)},
         }
     )
     chrome = json.dumps({role: list(pair) for role, pair in CHROME.items()})

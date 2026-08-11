@@ -18,6 +18,7 @@ def snapshot(
     associations,
     accounting_summary,
     usage_reports,
+    storage_reports,
     user_usage_rows,
     users,
     projects,
@@ -31,6 +32,7 @@ def snapshot(
     snap.write("openportal-associations", to_frame(associations))
     snap.write("openportal-accounting-summary", to_frame(accounting_summary))
     snap.write("openportal-project-usage-reports", to_frame(usage_reports))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
     snap.write("openportal-allocation-user-usage", to_frame(user_usage_rows))
     snap.write_meta({})
     return snap
@@ -90,6 +92,8 @@ def test_every_figure_is_present(page):
         "Which projects are alive",
         "How concentrated we are",
         "Are more people using it?",
+        "How full the project disks are",
+        "How full people",
     ):
         assert heading in page, heading
 
@@ -339,3 +343,104 @@ def test_the_awarded_percentage_agrees_between_prose_and_tile(snapshot):
     tile = re.search(r'Awarded to projects</div><div class="value">(\d+)%', page)
     assert prose and tile
     assert prose.group(1) == tile.group(1)
+
+
+# -- storage quotas ---------------------------------------------------------
+
+
+def test_quota_colour_is_a_bounded_fraction_on_a_linear_scale(snapshot):
+    """The departure from the node-hour heatmap, and the reason it reads.
+
+    A fill percentage runs 0 to 100 and the whole decision lives at the top of
+    that range. On the log ramp the activity heatmap uses, half-full and
+    nearly-full would sit a few pixels apart.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_projects(monthly)
+    trace = figure.data[0]
+    assert (trace.zmin, trace.zmax) == (0, viz.FILL_CEILING)
+    assert list(trace.colorbar.ticktext) == ["0", "25%", "50%", "75%", "100%"]
+
+
+def test_quota_figures_carry_their_own_ramp(snapshot):
+    """Named, so a theme repaint cannot hand them the activity blues."""
+    monthly = reports.storage_monthly(snapshot)
+    for figure in (
+        viz.figure_storage_projects(monthly),
+        viz.figure_storage_users(monthly),
+    ):
+        assert figure.data[0].meta == {"ramp": "fill"}
+
+
+def test_a_month_short_of_readings_is_marked_on_the_axis(snapshot):
+    """A column standing on one reading is not comparable with one on thirty."""
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_projects(monthly)
+    assert all(label.endswith("*") for label in figure.data[0].x)
+
+
+def test_quota_rows_put_the_fullest_at_the_top(snapshot):
+    """Plotly draws the first row at the bottom, so ascending peak is correct."""
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_users(monthly)
+    peaks = []
+    for label in figure.data[0].y:
+        username, code = label.split(" · ")
+        rows = monthly.filter((pl.col("username") == username) & (pl.col("project_code") == code))
+        peaks.append(max(value or -1 for value in rows["peak_fill_pct"].to_list()))
+    assert peaks == sorted(peaks)
+
+
+def test_quota_buttons_are_one_flat_row(snapshot):
+    """Flat rather than two groups, because plotly's groups do not compose.
+
+    A second row of buttons would silently reset the first, and a control that
+    undoes another control is worse than a longer row of honest ones.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    projects = viz.figure_storage_projects(monthly)
+    assert len(projects.layout.updatemenus) == 1
+    assert [button.label for button in projects.layout.updatemenus[0].buttons] == [
+        "Peak",
+        "End",
+        "Median",
+        "Peak size",
+        "End size",
+        "Median size",
+    ]
+    users = viz.figure_storage_users(monthly)
+    assert [button.label for button in users.layout.updatemenus[0].buttons] == [
+        "Home peak",
+        "Home end",
+        "Home median",
+        "Scratch peak",
+        "Scratch end",
+        "Scratch median",
+    ]
+
+
+def test_every_quota_cell_names_its_size_and_its_evidence(snapshot):
+    """No button carries the size for people, so the tooltip always must."""
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_users(monthly)
+    hovers = [text for row in figure.data[0].text for text in row if text != "no reading"]
+    assert hovers
+    assert all("days" in text for text in hovers)
+    assert all(any(unit in text for unit in ("KB", "MB", "GB", "TB")) for text in hovers)
+
+
+def test_quota_figures_are_absent_rather_than_empty(tmp_path, allocations):
+    """A snapshot that never pulled storage loses two figures, not the report."""
+    snap = Snapshot.create(tmp_path, "bare")
+    snap.write("openportal-allocations", to_frame(allocations))
+    snap.write_meta({})
+    monthly = reports.storage_monthly(snap)
+    assert viz.figure_storage_projects(monthly) is None
+    assert viz.figure_storage_users(monthly) is None
+
+
+def test_the_page_says_so_when_the_readings_have_gone_stale(snapshot):
+    """The columns simply stop, and nothing else on the page would say why."""
+    current = reports.storage(snapshot)
+    assert "readings stop on" in viz._storage_staleness(current)
+    assert viz._storage_staleness(current.head(0)) == ""
