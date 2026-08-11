@@ -60,6 +60,7 @@ def snapshot(
     accounting_summary,
     invoices,
     usage_reports,
+    storage_reports,
     user_usage_rows,
     users,
     projects,
@@ -74,6 +75,7 @@ def snapshot(
     snap.write("openportal-associations", to_frame(associations))
     snap.write("openportal-accounting-summary", to_frame(accounting_summary))
     snap.write("openportal-project-usage-reports", to_frame(usage_reports))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
     snap.write("openportal-allocation-user-usage", to_frame(user_usage_rows))
     snap.write_meta({})
     # `reports.as_of` reads this, and everything date-dependent below follows
@@ -143,6 +145,8 @@ def build_expected(snapshot: Snapshot) -> dict[str, object]:
         "invoiced": records(reports.invoiced(snapshot, customer=CUSTOMER)),
         "reconcile": records(reports.reconcile(snapshot, customer=CUSTOMER)),
         "queue_monthly": records(viz.queue_monthly(snapshot, codes)),
+        "storage_current": records(reports.storage(snapshot)),
+        "storage_monthly": records(reports.storage_monthly(snapshot)),
         "people_with_access": viz.people_with_access(snapshot, codes),
         "ranked_bands": records(
             viz._ranked(per_project)
@@ -158,6 +162,7 @@ def build_fixture(
     accounting_summary,
     invoices,
     usage_reports,
+    storage_reports,
     user_usage_rows,
     users,
     projects,
@@ -176,6 +181,7 @@ def build_fixture(
         "openportal-accounting-summary": accounting_summary,
         "openportal-allocation-user-usage": user_usage_rows,
         "openportal-project-usage-reports": usage_reports,
+        "openportal-project-storage-reports": storage_reports,
         "invoices": invoices,
         "customers": customers,
         "projects": projects,
@@ -209,6 +215,7 @@ def test_fixture_is_current(
     accounting_summary,
     invoices,
     usage_reports,
+    storage_reports,
     user_usage_rows,
     users,
     projects,
@@ -222,6 +229,7 @@ def test_fixture_is_current(
             accounting_summary,
             invoices,
             usage_reports,
+            storage_reports,
             user_usage_rows,
             users,
             projects,
@@ -264,3 +272,39 @@ def test_the_fixture_exercises_what_it_claims_to(snapshot):
     assert all(row["status"] == "ok" for row in expected["reconcile"])
     # Associations that are out of scope and associations that are blanked.
     assert expected["people_with_access"] == 2
+
+    # -- storage ------------------------------------------------------------
+    monthly_storage = expected["storage_monthly"]
+    # The out-of-scope project's disks stay off our page entirely.
+    assert all(row["project_code"] != "zzz9" for row in monthly_storage)
+    assert all(row["project_code"] != "zzz9" for row in expected["storage_current"])
+    # A finished month and the month in progress, so the daily dictionary and
+    # the bare snapshot are both exercised.
+    assert sorted({row["month"] for row in monthly_storage}) == ["2025-01", "2026-02"]
+
+    january = next(
+        row
+        for row in monthly_storage
+        if row["month"] == "2025-01" and row["kind"] == "project" and row["project_code"] == "abc1"
+    )
+    # Three days from two dictionaries: the 29th and 30th out of `daily_reports`
+    # and the 31st out of the top-level snapshot, which is the only place the
+    # last day of a month is ever reported.
+    assert january["days_observed"] == 3
+    assert january["is_partial"] is True
+    # Six samples over those three days, because two collectors reported each.
+    assert january["samples"] == 6
+    # Peak and median differ, so a figure defaulting to the wrong one is visible.
+    assert january["peak_fill_pct"] != january["median_fill_pct"]
+
+    # A limit that is not a size blanks the percentage rather than dividing.
+    unlimited = [row for row in monthly_storage if row["project_code"] == "abc2"]
+    assert unlimited and all(row["peak_fill_pct"] is None for row in unlimited)
+    # The February reading inside that January row was dropped, not misfiled.
+    assert all(row["month"] == "2025-01" for row in unlimited)
+
+    # Both filesystems, so the user figure's buttons have something to switch.
+    assert {row["filesystem"] for row in monthly_storage if row["kind"] == "user"} == {
+        "home",
+        "scratch",
+    }

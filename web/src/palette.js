@@ -54,6 +54,29 @@ export const RAMP_DARK = [
   '#242423', '#104281', '#184f95', '#256abf', '#3987e5', '#6da7ec', '#cde2fb',
 ];
 
+/**
+ * Sequential ramp for the quota heatmaps, with a hot tail.
+ *
+ * Unlike node hours, a fill percentage is *bounded*: the whole decision runs
+ * from empty to full, and the top of that range is the only part anyone acts
+ * on. So the ramp leaves the blues around two thirds and finishes through
+ * amber into red, which puts the quotas about to fail in a colour nothing else
+ * on the page uses. Every hex comes from `SERIES` or `CHROME`, so the
+ * light/dark swap needs no new pairs.
+ */
+export const RAMP_FILL_LIGHT = [
+  '#f0efec', '#d8e8f8', '#9ec5f4', '#6da7ec', '#eda100', '#eb6834', '#d03b3b',
+];
+export const RAMP_FILL_DARK = [
+  '#242423', '#104281', '#256abf', '#3987e5', '#eda100', '#eb6834', '#d03b3b',
+];
+
+/** Ramps by the name traces carry in `meta.ramp`. */
+export const RAMPS = {
+  activity: { light: RAMP_LIGHT, dark: RAMP_DARK },
+  fill: { light: RAMP_FILL_LIGHT, dark: RAMP_FILL_DARK },
+};
+
 export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
 /**
@@ -97,7 +120,10 @@ export function paint(dark) {
     div.data.forEach((trace, position) => {
       const style = {};
       if (trace.meta && trace.meta.ramp) {
-        style.colorscale = [colorscale(dark ? RAMP_DARK : RAMP_LIGHT)];
+        // Named rather than assumed: activity is one hue, the quota ramps end
+        // in red, and repainting must not swap one figure's scale for another's.
+        const ramp = RAMPS[trace.meta.ramp] ?? RAMPS.activity;
+        style.colorscale = [colorscale(dark ? ramp.dark : ramp.light)];
         style['colorbar.tickfont.color'] = [CHROME.muted[index]];
         style['colorbar.title.font.color'] = [CHROME.ink_soft[index]];
       } else {

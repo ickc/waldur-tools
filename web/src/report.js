@@ -34,7 +34,7 @@ import {
 } from './api.js';
 import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
-  figureTotalsByProject, format,
+  figureStorageProjects, figureStorageUsers, figureTotalsByProject, format,
 } from './figures.js';
 import {
   PROSE, esc, intro, method, reconcileTable, section, tableView, tile,
@@ -60,6 +60,7 @@ const state = {
     projects: [],
     invoices: [],
     usageReports: [],
+    storageReports: [],
     /** `users/me/`: the token's own account, for the organisation it belongs to. */
     me: null,
     associations: null,
@@ -133,7 +134,9 @@ function usageRows() {
 
 function render() {
   const { nodes, share, customer } = state.options;
-  const { allocations, summary, customers, projects, invoices, usageReports } = state.raw;
+  const {
+    allocations, summary, customers, projects, invoices, usageReports, storageReports,
+  } = state.raw;
   const scope = reports.inScope(allocations);
   const rows = reports.monthlyRows(usageRows(), scope, customer);
   if (!rows.length) {
@@ -164,6 +167,16 @@ function render() {
   const monthlyShare = totals[totals.length - 1].entitlement_node_hours || 1;
   const unallocatedMonths = unallocated / monthlyShare;
   const queue = reports.queueMonthly(usageReports, codes);
+
+  // Scoped to the same project codes as everything else: the storage endpoint
+  // reports every project on the machine, not only the ones this token
+  // administers, and an unscoped figure would put other organisations' disks
+  // on our page.
+  const storageSamples = reports.storageSamples(storageReports, codes);
+  const storageByMonth = reports.storageMonthly(storageSamples);
+  const storageNow = reports.storageCurrent(storageSamples);
+  const projectQuota = figureStorageProjects(storageByMonth);
+  const userQuota = figureStorageUsers(storageByMonth);
 
   const awardedPct = latest
     ? (100 * awarded[months.indexOf(latest.month)]) / latest.entitlement_node_hours
@@ -268,6 +281,8 @@ function render() {
   ensureSection('heatmap', 'Which projects are alive');
   ensureSection('totals', 'How concentrated we are');
   ensureSection('engagement', 'Are more people using it?');
+  if (projectQuota !== null) ensureSection('storage-projects', 'How full the project disks are');
+  if (userQuota !== null) ensureSection('storage-users', "How full people's own disks are");
   if (queue.length) ensureSection('queue', 'Demand, and what it cost to wait');
 
   draw('share', figureShare(totals, nodes, share, awarded));
@@ -299,6 +314,31 @@ function render() {
 
   draw('totals', figureTotalsByProject(reports.totalsByProject(perProject)));
   draw('engagement', figureEngagement(totals, existing));
+
+  if (projectQuota !== null) {
+    draw('storage-projects', projectQuota);
+    table('storage-projects', storageNow.filter((row) => row.kind === 'project'), [
+      ['project_code', 'Project'],
+      ['filesystem', 'Filesystem'],
+      ['usage_bytes', 'Used', 'size'],
+      ['limit_bytes', 'Quota', 'size'],
+      ['fill_pct', '% full', 'number'],
+      ['date', 'Last read'],
+    ]);
+  }
+
+  if (userQuota !== null) {
+    draw('storage-users', userQuota);
+    table('storage-users', storageNow.filter((row) => row.kind === 'user'), [
+      ['username', 'User'],
+      ['project_code', 'Project'],
+      ['filesystem', 'Filesystem'],
+      ['usage_bytes', 'Used', 'size'],
+      ['limit_bytes', 'Quota', 'size'],
+      ['fill_pct', '% full', 'number'],
+      ['date', 'Last read'],
+    ]);
+  }
 
   if (queue.length) {
     draw('queue', figureQueue(queue));
@@ -443,12 +483,13 @@ async function run({ refresh = false } = {}) {
 }
 
 /**
- * The two endpoints nothing on the critical path needs.
+ * The endpoints nothing on the critical path needs.
  *
  * `openportal-project-usage-reports` carries a fat per-day blob and backs one
- * figure; `openportal-associations` is thousands of rows across the whole
- * machine and backs one denominator on one tile. Both are worth having and
- * neither is worth waiting for.
+ * figure; `openportal-project-storage-reports` carries another and backs the
+ * two quota figures; `openportal-associations` is thousands of rows across the
+ * whole machine and backs one denominator on one tile. All are worth having and
+ * none is worth waiting for.
  *
  * Associations is pulled with a duplicate check, because measured against the
  * live deployment it is *also* not totally ordered: the row count matches every
@@ -461,6 +502,8 @@ async function run({ refresh = false } = {}) {
  */
 async function loadExtras() {
   state.raw.usageReports = await state.client.list('openportal-project-usage-reports');
+  scheduleRender();
+  state.raw.storageReports = await state.client.list('openportal-project-storage-reports');
   scheduleRender();
   state.raw.associations = await state.client.list('openportal-associations', {
     rowKeys: ['uuid'],

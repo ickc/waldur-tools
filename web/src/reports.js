@@ -716,3 +716,263 @@ export function projectSummary(perProject) {
   }
   return [...rolled.values()].sort((a, b) => b.node_hours - a.node_hours);
 }
+
+// -- storage quotas ---------------------------------------------------------
+
+/**
+ * Binary multipliers for the sizes the storage collector writes.
+ *
+ * Its "GB" is a GiB: it reports `"100.00 GB"` for the same home quota
+ * `lfs quota -h` calls `100G`, and a 1000-based reading of that figure would be
+ * 93.13 GiB. Only the absolute views depend on the choice -- a fill percentage
+ * divides two figures carrying the same unit, so it is base-independent.
+ */
+const SIZE_UNITS = {
+  B: 1,
+  KB: 1024 ** 1,
+  MB: 1024 ** 2,
+  GB: 1024 ** 3,
+  TB: 1024 ** 4,
+  PB: 1024 ** 5,
+};
+
+const SIZE = /^\s*([0-9]*\.?[0-9]+)\s*([KMGTP]?B)\s*$/i;
+
+/** The filesystems charged to a project rather than to a person. */
+export const PROJECT_FILESYSTEMS = ['projects'];
+
+/**
+ * `"1.50 TB"` as a number of bytes, or `null` if it is not a size.
+ *
+ * Null rather than throwing: this parses a free-form field inside a free-form
+ * blob, and one unrecognised string should blank one cell rather than take down
+ * the whole report.
+ */
+export function sizeBytes(text) {
+  if (typeof text !== 'string') return null;
+  const match = SIZE.exec(text);
+  if (match === null) return null;
+  return Number(match[1]) * SIZE_UNITS[match[2].toUpperCase()];
+}
+
+/** A byte count written the way the collector wrote it: `"46.79 GB"`. */
+export function humaniseBytes(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  let size = value;
+  for (const unit of ['B', 'KB', 'MB', 'GB', 'TB']) {
+    if (Math.abs(size) < 1024 || unit === 'TB') {
+      return unit === 'B' ? `${sizeText(size, 0)} B` : `${sizeText(size, 2)} ${unit}`;
+    }
+    size /= 1024;
+  }
+  return `${sizeText(size, 2)} PB`;
+}
+
+function sizeText(value, digits) {
+  return value.toLocaleString('en-GB', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+/**
+ * Every quota reading in the pull, one row per scope, filesystem and sample.
+ *
+ * `openportal-project-storage-reports` returns one row per project, resource
+ * and month, with a `report` blob holding quota readings. Like `queueMonthly`
+ * this reshapes rather than selects, and it is what both storage figures are
+ * built from.
+ *
+ * **Two shapes share the blob.** A finished month carries `daily_reports`, a
+ * dictionary keyed by date; the month still in progress carries no such
+ * dictionary at all, only the top-level snapshot. Both are read here, which
+ * matters twice over: the top-level snapshot of a finished month is taken
+ * *after* its last daily entry, so reading it recovers a final day the daily
+ * dictionary alone would lose, and it is the only reading the open month has.
+ *
+ * **A day can be sampled more than once.** The same filesystem is reported
+ * under each `resource` the project holds, by collectors running minutes apart,
+ * so two readings of one day legitimately disagree. They are kept as separate
+ * samples rather than deduplicated: storage is a property of the filesystem and
+ * not of the cluster, so these are repeat measurements of one quantity, and
+ * letting the monthly aggregation see all of them is what makes `peak` honest.
+ */
+export function storageSamples(storageReports, codes = null) {
+  const wanted = codes === null ? null : new Set(codes);
+  const rows = [];
+
+  for (const record of storageReports ?? []) {
+    // An object live from the API, a JSON string out of a parquet snapshot.
+    let payload = record.report;
+    if (typeof payload === 'string') {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+    }
+    if (payload === null || typeof payload !== 'object') continue;
+
+    const stamp = record.year && record.month ? monthKey(record.year, record.month) : null;
+    const readings = [...Object.entries(payload.daily_reports ?? {}), [null, payload]];
+
+    for (const [day, reading] of readings) {
+      if (reading === null || typeof reading !== 'object') continue;
+      const observed = reading.generated_at ?? '';
+      const when = day ?? observed.slice(0, 10);
+      // The row's own year and month are what the API says it describes; a
+      // reading dated outside them would put a day in the wrong column.
+      if (!when || (stamp !== null && when.slice(0, 7) !== stamp)) continue;
+
+      const identifier = reading.project ?? record.project_identifier ?? '';
+      const code = firstSegment(identifier);
+      if (code === null || (wanted !== null && !wanted.has(code))) continue;
+
+      const push = (kind, username, filesystem, quota) => {
+        const usage = sizeBytes(quota === null ? null : quota?.usage);
+        const limit = sizeBytes(quota === null ? null : quota?.limit);
+        rows.push({
+          observed_at: observed,
+          date: when,
+          month: when.slice(0, 7),
+          kind,
+          project_code: code,
+          username,
+          filesystem,
+          usage_bytes: usage,
+          limit_bytes: limit,
+          fill_pct: limit && usage !== null ? (100 * usage) / limit : null,
+        });
+      };
+
+      for (const [filesystem, quota] of Object.entries(reading.project_quotas ?? {})) {
+        push('project', null, filesystem, quota);
+      }
+      for (const [who, quotas] of Object.entries(reading.user_quotas ?? {})) {
+        for (const [filesystem, quota] of Object.entries(quotas ?? {})) {
+          push('user', firstSegment(who), filesystem, quota);
+        }
+      }
+    }
+  }
+
+  return rows.sort((a, b) => a.observed_at.localeCompare(b.observed_at));
+}
+
+/** The key identifying one quota across months. */
+function storageKey(row) {
+  return `${row.kind} ${row.project_code} ${row.username ?? ''} ${row.filesystem}`;
+}
+
+/**
+ * How full every quota was when it was last read, fullest first.
+ *
+ * The current-state view: one row per project or person per filesystem,
+ * carrying the most recent reading of it. `date` is part of the answer rather
+ * than decoration -- these readings are only as current as the collector behind
+ * them, which is not the same thing as how fresh the pull is.
+ */
+export function storageCurrent(samples) {
+  const latest = new Map();
+  // Samples arrive sorted by `observed_at`, so the last write per key wins.
+  for (const row of samples) latest.set(storageKey(row), row);
+  return [...latest.values()]
+    .map((row) => ({
+      kind: row.kind,
+      project_code: row.project_code,
+      username: row.username,
+      filesystem: row.filesystem,
+      usage_bytes: row.usage_bytes,
+      limit_bytes: row.limit_bytes,
+      fill_pct: row.fill_pct,
+      date: row.date,
+    }))
+    .sort(
+      (a, b) =>
+        (b.fill_pct ?? -1) - (a.fill_pct ?? -1) ||
+        a.kind.localeCompare(b.kind) ||
+        a.project_code.localeCompare(b.project_code) ||
+        (a.username ?? '').localeCompare(b.username ?? ''),
+    );
+}
+
+/**
+ * Each quota reduced to one row per month, for the storage heatmaps.
+ *
+ * Disk usage is a *level*, not a flow: unlike node hours there is nothing to
+ * sum, and a month has to be summarised by choosing a statistic rather than by
+ * adding one up. `peak` is the fullest it got -- the reading that decides
+ * whether writes failed, and the default; `end` is the level carried into the
+ * next month; `median` is the typical level, robust to one day's spike.
+ *
+ * A mean is deliberately absent. Averaging a slowly drifting level is close to
+ * meaningless -- it is the mean of a random walk -- and it hides the peak,
+ * which is the part that actually breaks jobs.
+ *
+ * `is_partial` means *fewer daily readings than the month has days*, which is a
+ * different claim from the `is_partial` of `monthlyTotals`: there it marks the
+ * month the pull happened in. Storage readings lag their own collector, so
+ * freshness here cannot be derived from the pull date.
+ */
+export function storageMonthly(samples) {
+  const buckets = new Map();
+  for (const row of samples) {
+    const key = `${row.month} ${storageKey(row)}`;
+    let bucket = buckets.get(key);
+    if (bucket === undefined) {
+      bucket = {
+        month: row.month,
+        kind: row.kind,
+        project_code: row.project_code,
+        username: row.username,
+        filesystem: row.filesystem,
+        fills: [],
+        usages: [],
+        days: new Set(),
+        limit_bytes: null,
+        samples: 0,
+      };
+      buckets.set(key, bucket);
+    }
+    if (row.fill_pct !== null) bucket.fills.push(row.fill_pct);
+    if (row.usage_bytes !== null) bucket.usages.push(row.usage_bytes);
+    bucket.days.add(row.date);
+    bucket.limit_bytes = row.limit_bytes;
+    bucket.samples += 1;
+  }
+
+  return [...buckets.values()]
+    .map((bucket) => ({
+      month: bucket.month,
+      kind: bucket.kind,
+      project_code: bucket.project_code,
+      username: bucket.username,
+      filesystem: bucket.filesystem,
+      peak_fill_pct: bucket.fills.length ? Math.max(...bucket.fills) : null,
+      end_fill_pct: bucket.fills.length ? bucket.fills[bucket.fills.length - 1] : null,
+      median_fill_pct: median(bucket.fills),
+      peak_bytes: bucket.usages.length ? Math.max(...bucket.usages) : null,
+      end_bytes: bucket.usages.length ? bucket.usages[bucket.usages.length - 1] : null,
+      median_bytes: median(bucket.usages),
+      limit_bytes: bucket.limit_bytes,
+      days_observed: bucket.days.size,
+      samples: bucket.samples,
+      is_partial: bucket.days.size < daysInMonth(bucket.month),
+    }))
+    .sort(
+      (a, b) =>
+        a.month.localeCompare(b.month) ||
+        a.kind.localeCompare(b.kind) ||
+        a.project_code.localeCompare(b.project_code) ||
+        (a.username ?? '').localeCompare(b.username ?? '') ||
+        a.filesystem.localeCompare(b.filesystem),
+    );
+}
+
+/** The middle value, matching polars: the mean of the two middles when even. */
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}

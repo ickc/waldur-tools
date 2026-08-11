@@ -21,9 +21,11 @@
  */
 
 import {
-  CHROME, FLOOR_NODE_HOURS, FONT, RAMP_LIGHT, SERIES, colorscale, light,
+  CHROME, FLOOR_NODE_HOURS, FONT, RAMP_FILL_LIGHT, RAMP_LIGHT, SERIES, colorscale, light,
 } from './palette.js';
-import { monthLabel } from './reports.js';
+import {
+  PROJECT_FILESYSTEMS, daysInMonth, humaniseBytes, monthLabel,
+} from './reports.js';
 
 /** Shared layout: recessive chrome, generous padding, hover on by default. */
 function layout(overrides = {}) {
@@ -398,7 +400,7 @@ export function figureHeatmap(perProject, totals, allocation) {
         xgap: 2,
         ygap: 2,
         colorbar: bar,
-        meta: { ramp: true },
+        meta: { ramp: 'activity' },
       },
     ],
     layout: layout({
@@ -604,3 +606,247 @@ export function format(value, digits = 0) {
 }
 
 export { CHROME };
+
+/**
+ * Where the quota ramp tops out.
+ *
+ * A reading past this is drawn at the hot end rather than stretching the scale
+ * for one over-quota cell -- the hover still reports the true figure, and
+ * everything past full is equally actionable.
+ */
+const FILL_CEILING = 100;
+
+/** Colourbar ticks for the size views, in log10 bytes: 1 MiB, 1 GiB, 1 TiB. */
+const SIZE_TICKS = [2, 3, 4].map((power) => Math.log10(1024 ** power));
+
+/**
+ * One cell's tooltip: how full, in what, and on how much evidence.
+ *
+ * The size is spelled out on every cell rather than hidden behind a button.
+ * That is what lets the quota figures spend their buttons on the axes that
+ * change the picture -- the statistic, and for people the filesystem -- instead
+ * of on an absolute view that would say the same thing in a colour.
+ */
+function storageHover(row, stat) {
+  const fill = row[`${stat}_fill_pct`];
+  const used = humaniseBytes(row[`${stat}_bytes`]);
+  const days = daysInMonth(row.month);
+  const seen = row.days_observed;
+  const coverage = seen >= days ? `all ${days} days` : `${seen} of ${days} days read`;
+  if (fill === null) return `${used}, no limit reported · ${coverage}`;
+  const limit = humaniseBytes(row.limit_bytes);
+  return `${fill.toFixed(1)}% full — ${used} of ${limit} · ${coverage}`;
+}
+
+/** The z matrix and hover text for one view of a quota heatmap. */
+function storageCells(lookup, order, months, stat, absolute) {
+  const z = [];
+  const text = [];
+  for (const key of order) {
+    const values = [];
+    const labels = [];
+    for (const month of months) {
+      const row = lookup.get(`${key} ${month}`);
+      const raw = row === undefined ? null : row[absolute ? `${stat}_bytes` : `${stat}_fill_pct`];
+      if (row === undefined || raw === null) {
+        values.push(null);
+        labels.push('no reading');
+        continue;
+      }
+      values.push(absolute ? Math.log10(raw + 1) : Math.min(raw, FILL_CEILING));
+      labels.push(storageHover(row, stat));
+    }
+    z.push(values);
+    text.push(labels);
+  }
+  return [z, text];
+}
+
+/** The colourbar spec and z range for a fill view or a size view. */
+function storageBar(absolute, sizeRange) {
+  if (absolute) {
+    return {
+      title: 'Size',
+      tickvals: SIZE_TICKS,
+      ticktext: ['1 MB', '1 GB', '1 TB'],
+      zmin: sizeRange[0],
+      zmax: sizeRange[1],
+    };
+  }
+  return {
+    title: '% of quota',
+    tickvals: [0, 25, 50, 75, 100],
+    ticktext: ['0', '25%', '50%', '75%', '100%'],
+    zmin: 0,
+    zmax: FILL_CEILING,
+  };
+}
+
+/**
+ * The shared body of both quota heatmaps.
+ *
+ * `views` is a flat list of `{label, filesystem, stat, absolute}`. Flat rather
+ * than two button groups because plotly's groups do not compose: a second row
+ * of buttons would silently reset the first, and a control that undoes another
+ * control is worse than a longer row of honest ones.
+ */
+function storageHeatmap(rows, { views, heading, leftMargin }) {
+  if (!rows.length) return null;
+
+  const months = [...new Set(rows.map((row) => row.month))].sort();
+  // A month is short if even its best-observed quota missed days. Marked on
+  // the axis, because a column standing on one reading is not comparable with
+  // one standing on thirty and nothing else on the page would say so.
+  const coverage = new Map();
+  for (const row of rows) {
+    coverage.set(row.month, Math.max(coverage.get(row.month) ?? 0, row.days_observed));
+  }
+  const ticks = months.map(
+    (month) => monthLabel(month) + (coverage.get(month) < daysInMonth(month) ? '*' : ''),
+  );
+
+  const worst = new Map();
+  for (const row of rows) {
+    worst.set(row.row_key, Math.max(worst.get(row.row_key) ?? -1, row.peak_fill_pct ?? -1));
+  }
+  // Ascending, because plotly draws the first row at the bottom: the fullest
+  // quota -- the one worth acting on -- ends up at the top of the figure.
+  const order = [...worst.entries()]
+    .sort((a, b) => a[1] - b[1] || b[0].localeCompare(a[0]))
+    .map(([key]) => key);
+
+  const matrices = views.map(({ filesystem, stat, absolute }) => {
+    const lookup = new Map();
+    for (const row of rows) {
+      if (row.filesystem !== filesystem) continue;
+      lookup.set(`${row.row_key} ${row.month}`, row);
+    }
+    return storageCells(lookup, order, months, stat, absolute);
+  });
+
+  const sizes = [];
+  for (const { stat, absolute } of views) {
+    if (!absolute) continue;
+    for (const row of rows) {
+      if (row[`${stat}_bytes`] !== null) sizes.push(row[`${stat}_bytes`]);
+    }
+  }
+  const sizeRange = sizes.length
+    ? [Math.log10(Math.min(...sizes) + 1), Math.log10(Math.max(...sizes) + 1)]
+    : [0, 1];
+
+  const first = storageBar(views[0].absolute, sizeRange);
+
+  return {
+    data: [
+      {
+        type: 'heatmap',
+        x: ticks,
+        y: order,
+        z: matrices[0][0],
+        text: matrices[0][1],
+        zmin: first.zmin,
+        zmax: first.zmax,
+        colorscale: colorscale(RAMP_FILL_LIGHT),
+        hovertemplate: '%{y}<br>%{x}: %{text}<extra></extra>',
+        xgap: 2,
+        ygap: 2,
+        colorbar: {
+          title: { text: first.title, font: { color: light('ink_soft') } },
+          tickvals: first.tickvals,
+          ticktext: first.ticktext,
+          tickfont: { color: light('muted') },
+          outlinewidth: 0,
+          thickness: 12,
+        },
+        meta: { ramp: 'fill' },
+      },
+    ],
+    layout: layout({
+      height: 170 + 26 * order.length,
+      hovermode: 'closest',
+      margin: { l: leftMargin, r: 30, t: 104, b: 60 },
+      title: title(heading),
+      yaxis: { linecolor: light('axis'), tickfont: { color: light('muted') }, showgrid: false },
+      updatemenus: buttons(
+        views.map((view) => view.label),
+        views.map((view, index) => {
+          const bar = storageBar(view.absolute, sizeRange);
+          return [
+            {
+              z: [matrices[index][0]],
+              text: [matrices[index][1]],
+              zmin: [bar.zmin],
+              zmax: [bar.zmax],
+              'colorbar.title.text': bar.title,
+              'colorbar.tickvals': [bar.tickvals],
+              'colorbar.ticktext': [bar.ticktext],
+            },
+            {},
+          ];
+        }),
+      ),
+    }),
+  };
+}
+
+/**
+ * How full each project's shared storage got, month by month.
+ *
+ * The project quota is one filesystem, so the buttons spend themselves on the
+ * statistic and on an absolute view instead: a fill percentage answers "is this
+ * about to fail", and the size view answers "how much is actually there", which
+ * matters when every project carries the same limit and the percentages alone
+ * cannot tell a large project from a small one.
+ */
+export function figureStorageProjects(monthly) {
+  const rows = monthly
+    .filter((row) => row.kind === 'project' && PROJECT_FILESYSTEMS.includes(row.filesystem))
+    .map((row) => ({ ...row, row_key: row.project_code }));
+  return storageHeatmap(rows, {
+    views: [
+      { label: 'Peak', filesystem: 'projects', stat: 'peak', absolute: false },
+      { label: 'End', filesystem: 'projects', stat: 'end', absolute: false },
+      { label: 'Median', filesystem: 'projects', stat: 'median', absolute: false },
+      { label: 'Peak size', filesystem: 'projects', stat: 'peak', absolute: true },
+      { label: 'End size', filesystem: 'projects', stat: 'end', absolute: true },
+      { label: 'Median size', filesystem: 'projects', stat: 'median', absolute: true },
+    ],
+    heading: 'Project storage: how full the shared quota got, per month',
+    leftMargin: 140,
+  });
+}
+
+/**
+ * How full each person's home and scratch got, month by month.
+ *
+ * Two filesystems with limits two orders of magnitude apart, which is exactly
+ * why the colour is a percentage: on a size scale every home directory would
+ * read as empty next to a scratch quota, and it is the home directories that
+ * fill up. The buttons carry the filesystem here rather than an absolute view,
+ * since which disk is full is a different question from how full it is; sizes
+ * stay on every cell's tooltip.
+ */
+export function figureStorageUsers(monthly) {
+  const rows = monthly
+    .filter((row) => row.kind === 'user' && row.username !== null)
+    .map((row) => ({ ...row, row_key: `${row.username} · ${row.project_code}` }));
+  if (!rows.length) return null;
+  const filesystems = [...new Set(rows.map((row) => row.filesystem))].sort();
+  const views = [];
+  for (const filesystem of filesystems) {
+    for (const stat of ['peak', 'end', 'median']) {
+      views.push({
+        label: `${filesystem.charAt(0).toUpperCase()}${filesystem.slice(1)} ${stat}`,
+        filesystem,
+        stat,
+        absolute: false,
+      });
+    }
+  }
+  return storageHeatmap(rows, {
+    views,
+    heading: 'Personal storage: how full home and scratch got, per month',
+    leftMargin: 220,
+  });
+}

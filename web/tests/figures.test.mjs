@@ -20,7 +20,7 @@ import { describe, it } from 'node:test';
 
 import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
-  figureTotalsByProject,
+  figureStorageProjects, figureStorageUsers, figureTotalsByProject,
 } from '../src/figures.js';
 import { reconcileTable } from '../src/page.js';
 import { CHROME, SERIES } from '../src/palette.js';
@@ -60,7 +60,16 @@ const every = () => [
     fixture['openportal-project-usage-reports'],
     scope.map((row) => row.project_code),
   ))],
+  ['storage-projects', figureStorageProjects(storageByMonth)],
+  ['storage-users', figureStorageUsers(storageByMonth)],
 ];
+
+const storageByMonth = reports.storageMonthly(
+  reports.storageSamples(
+    fixture['openportal-project-storage-reports'],
+    scope.map((row) => row.project_code),
+  ),
+);
 
 /** Every colour the palette knows, in its light step. */
 const PALETTE = new Set([
@@ -233,6 +242,84 @@ describe('the heatmap', () => {
 describe('the demand figure', () => {
   it('is absent rather than empty when the portal has no usage reports', () => {
     assert.equal(figureQueue([]), null);
+  });
+});
+
+describe('the quota heatmaps', () => {
+  it('colours a bounded fraction on a linear scale, not a log one', () => {
+    // The departure from the node-hour heatmap, and the reason the figure is
+    // readable: a fill percentage runs 0 to 100 and the whole decision lives
+    // at the top of that range. A log ramp would put half-full and nearly-full
+    // a few pixels apart.
+    const figure = figureStorageProjects(storageByMonth);
+    assert.equal(figure.data[0].zmin, 0);
+    assert.equal(figure.data[0].zmax, 100);
+    assert.deepEqual(figure.data[0].colorbar.ticktext, ['0', '25%', '50%', '75%', '100%']);
+  });
+
+  it('carries its own ramp, so a repaint cannot hand it the activity blues', () => {
+    assert.equal(figureStorageProjects(storageByMonth).data[0].meta.ramp, 'fill');
+    assert.equal(figureStorageUsers(storageByMonth).data[0].meta.ramp, 'fill');
+  });
+
+  it('marks a month that was not observed on every day', () => {
+    // Both fixture months are short, and a column standing on one reading is
+    // not comparable with one standing on thirty.
+    const figure = figureStorageProjects(storageByMonth);
+    assert.ok(figure.data[0].x.every((label) => label.endsWith('*')));
+  });
+
+  it('orders rows so the fullest quota is at the top', () => {
+    // Plotly draws the first row at the bottom, so ascending peak puts the
+    // person about to run out where the eye lands.
+    const figure = figureStorageUsers(storageByMonth);
+    const peaks = figure.data[0].y.map((key) => {
+      const rows = storageByMonth.filter(
+        (row) => `${row.username} · ${row.project_code}` === key,
+      );
+      return Math.max(...rows.map((row) => row.peak_fill_pct ?? -1));
+    });
+    assert.deepEqual(peaks, [...peaks].sort((a, b) => a - b));
+  });
+
+  it('spends its buttons on the filesystem for people and on size for projects', () => {
+    // Flat rather than two groups, because plotly's groups do not compose.
+    const projects = figureStorageProjects(storageByMonth);
+    assert.deepEqual(
+      projects.layout.updatemenus[0].buttons.map((button) => button.label),
+      ['Peak', 'End', 'Median', 'Peak size', 'End size', 'Median size'],
+    );
+    const users = figureStorageUsers(storageByMonth);
+    assert.deepEqual(
+      users.layout.updatemenus[0].buttons.map((button) => button.label),
+      ['Home peak', 'Home end', 'Home median', 'Scratch peak', 'Scratch end', 'Scratch median'],
+    );
+  });
+
+  it('puts the size on every tooltip, since no button carries it for people', () => {
+    const figure = figureStorageUsers(storageByMonth);
+    const hovers = figure.data[0].text.flat().filter((text) => text !== 'no reading');
+    assert.ok(hovers.length);
+    assert.ok(hovers.every((text) => /\d GB|\d TB|\d MB|\d KB/.test(text)));
+    assert.ok(hovers.every((text) => text.includes('days')));
+  });
+
+  it('leaves a quota with no reading blank, not at zero', () => {
+    // One fixture user holds a home quota and no scratch one, so the blank
+    // appears when the buttons switch filesystem rather than on the default
+    // view. Drawing it as zero would claim an empty disk, not an absent one.
+    const figure = figureStorageUsers(storageByMonth);
+    const scratch = figure.layout.updatemenus[0].buttons.find(
+      (button) => button.label === 'Scratch peak',
+    );
+    const [{ z, text }] = scratch.args;
+    assert.ok(z[0].flat().includes(null));
+    assert.ok(text[0].flat().includes('no reading'));
+  });
+
+  it('is absent rather than empty when the portal reports no quotas', () => {
+    assert.equal(figureStorageProjects([]), null);
+    assert.equal(figureStorageUsers([]), null);
   });
 });
 

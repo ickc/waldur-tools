@@ -8,7 +8,7 @@
  */
 
 import { format } from './figures.js';
-import { monthLabel, monthLabelLong } from './reports.js';
+import { humaniseBytes, monthLabel, monthLabelLong } from './reports.js';
 
 export function esc(value) {
   return String(value ?? '')
@@ -39,6 +39,10 @@ export function tableView(rows, columns) {
           if (value === null || value === undefined) return '<td></td>';
           if (kind === 'month') return `<td>${esc(monthLabel(value))}</td>`;
           if (kind === 'number') return `<td>${format(Number(value), 1)}</td>`;
+          // Bytes are humanised here rather than upstream, so the row keeps a
+          // number: a quota in bytes is fourteen digits of noise at one
+          // decimal place, and a string would sort alphabetically.
+          if (kind === 'size') return `<td>${esc(humaniseBytes(Number(value)))}</td>`;
           return `<td>${esc(value)}</td>`;
         })
         .join('');
@@ -166,6 +170,22 @@ export const PROSE = {
     'Three counts on one axis. The gap between projects set up and projects that ran ' +
     'something is the onboarding gap; the people line is whether usage rests on more than ' +
     'a handful of individuals.',
+  'storage-projects':
+    'Node hours are a flow; disk is a level, so a month has to be summarised by picking a ' +
+    'statistic rather than by adding one up. <em>Peak</em> is the fullest it got &mdash; ' +
+    'the reading that decides whether writes failed, and the default. <em>End</em> is the ' +
+    'level carried into the next month, and <em>median</em> is the typical level, unmoved ' +
+    "by a single day's spike. Colour is the percentage of the quota rather than the size, " +
+    'because every project holds the same limit and only the fraction says who is in ' +
+    'trouble; the <em>size</em> views and every tooltip give the bytes. A month marked ' +
+    '<code>*</code> was not observed on every day.',
+  'storage-users':
+    'The same reading, per person. Home is a hundredth the size of scratch, so the two are ' +
+    'never comparable as sizes and the colour stays a percentage of whichever quota the ' +
+    'buttons select. Home is where this bites: it is small, it is where people put things ' +
+    'they meant to keep, and a full one stops a job as surely as a full scratch does. Rows ' +
+    'are ordered by the fullest that quota ever got, so the people worth an email are at ' +
+    'the top.',
   queue:
     'Utilisation that is low <em>and</em> quick to schedule is a demand problem; low ' +
     'utilisation with long waits is a job-shape or scheduling problem. This is as far as ' +
