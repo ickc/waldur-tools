@@ -553,6 +553,63 @@ figures. Output is one row per project/resource/day.
 
 monthly rows expand roughly thirtyfold into daily ones.
 
+### `storage` and `storage-monthly` — from `openportal-project-storage-reports`
+
+The other report that reshapes, and the fiddlier of the two. Each source row is
+a project/resource/month carrying a `report` blob, and **the blob comes in two
+shapes**: a finished month has a `daily_reports` dictionary keyed by date, while
+the month in progress has no such key at all and carries only the top-level
+snapshot. Both are read. That is not belt-and-braces — the top-level snapshot of
+a finished month is generated *after* its last daily entry, so it is the only
+place the last day of any month is ever reported, and it is the sole reading the
+open month has.
+
+Two more properties of the source that the parsing has to respect:
+
+- **A day is sampled more than once.** The same filesystem is reported under
+  every `resource` the project holds, by collectors running minutes apart, and
+  their figures legitimately differ by whatever was written in between. These
+  are repeat measurements of one quantity — storage belongs to the filesystem,
+  not to the cluster — so they are kept as separate samples rather than
+  deduplicated. Collapsing them would halve the evidence and make `peak` one
+  collector's opinion of the peak.
+- **Sizes are 1024-based.** The collector writes `"100.00 GB"` for the quota
+  `lfs quota -h` calls `100G`, so its "GB" is a GiB. Only the absolute views
+  depend on that reading; `fill_pct` divides two figures carrying the same unit.
+
+`storage_samples()` is the shared tidy frame both reports and both figures are
+built from — one row per scope, filesystem and sample.
+
+| Column | Derivation |
+| --- | --- |
+| `usage_bytes`, `limit_bytes` | the blob's size strings parsed to bytes; **null** if the string is not a size, e.g. an unlimited quota |
+| `fill_pct` | `100 * usage_bytes / limit_bytes`, **null** rather than a division when the limit is missing or zero |
+| `kind` | `project` for the `projects` quota, `user` for `home` and `scratch` |
+
+`storage` then keeps the newest sample per quota, sorted fullest first.
+`storage-monthly` reduces each quota to one row per month:
+
+| Column | Derivation |
+| --- | --- |
+| `peak_*` | the maximum over every sample in the month — the reading that decides whether writes failed |
+| `end_*` | the last sample by `generated_at` — the level carried into the next month |
+| `median_*` | the median over every sample, robust to one day's spike |
+| `days_observed` | distinct dates with a reading, which is **not** the sample count |
+| `samples` | readings behind the row, normally two per day |
+| `is_partial` | `days_observed < days in the calendar month` |
+
+**`is_partial` means something different here** from the column of the same name
+on `monthly-totals`, where it marks the month the snapshot was taken in. Storage
+readings lag their own collector rather than the snapshot, so the snapshot date
+says nothing about whether a storage month is complete: collection can start
+mid-month, stop mid-month, or drop a day. A mean is deliberately not among the
+statistics — averaging a slowly drifting level is the mean of a random walk, and
+it hides the peak, which the median already covers without doing so.
+
+A snapshot taken before this endpoint was pulled simply has no file for it, and
+every entry point here returns an empty frame rather than raising, so an old
+snapshot loses two figures instead of the whole report.
+
 ## The visual report
 
 `waldur_tools.viz` builds the HTML page. `render()` returns a string rather than
@@ -623,6 +680,27 @@ misleads. A change that undoes one of them should be deliberate.
 - **Sequential where the question is magnitude, categorical where it is
   identity.** The heatmap and the per-project totals bar are one hue; only the
   stacked figure and the engagement lines tell series apart.
+- **A bounded fraction is linear and ends in red; an unbounded magnitude is
+  logarithmic and stays one hue.** The quota heatmaps are the exception to the
+  rule above them, and deliberately so: a fill percentage runs from empty to
+  full and the whole decision lives at the top of that range, whereas node hours
+  have no ceiling and span three decades. So the quota figures colour
+  `min(fill_pct, viz.FILL_CEILING)` on a linear 0–100 ramp
+  (`RAMP_FILL_LIGHT`/`RAMP_FILL_DARK`) that leaves the blues around two thirds
+  and finishes through amber into red. Every hex in it still comes from `SERIES`
+  or `CHROME`, so the theme swap needs no new pairs.
+- **Ramps are named, not assumed.** A trace carries `meta={"ramp": <name>}` and
+  the repaint looks the name up, because there is now more than one ramp on the
+  page and a repaint that assumed a single one would hand the quota figures the
+  activity blues on every theme switch.
+- **Where controls would need two dimensions, the row is flattened rather than
+  stacked.** Plotly's button groups do not compose: a second row of buttons
+  issues its own `update` and silently resets the first, so `Scratch` followed
+  by `Median` would land on `Home · median`. The quota figures therefore carry
+  one flat row naming each combination outright. What does not fit in six
+  buttons goes to the tooltip instead — which is why sizes are on every quota
+  cell's hover, and why the per-person figure spends its buttons on the
+  filesystem while the per-project one spends them on absolute size.
 
 ### Supporting series
 
@@ -889,7 +967,11 @@ What is deliberately **not** pinned is presentation: `viz.py` and
 differ. What may not differ is any number either of them draws. A third test in
 that file guards the guard, asserting the fixture still exercises a partial
 month, a filtered-out organisation, a project with no usable award rate and a
-blanked association row — a golden file over trivial data proves nothing.
+blanked association row — a golden file over trivial data proves nothing. On the
+storage side it asserts the same of that endpoint's awkward parts: a finished
+month whose last day exists only in the top-level snapshot, a month in progress
+with no `daily_reports` at all, one day reported twice by two collectors, a
+limit that is not a size, and a reading dated outside the month its row claims.
 
 The same warning as above applies with more force: none of this opens a browser.
 The parity test covers the arithmetic and nothing else, so a change to the

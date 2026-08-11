@@ -75,6 +75,8 @@ pixi run waldur-tools viz -o utilisation.html            # the visual report
 | `reconcile` | Do those node hours agree with what the portal actually billed us? |
 | `user-usage` | Who are the heaviest users by cumulative node usage? |
 | `queue` | Daily job counts and mean queue wait, per project and resource |
+| `storage` | How full is every project and personal disk quota, fullest first? |
+| `storage-monthly` | The same per month, as peak/end/median — what the quota heatmaps draw |
 
 Common options: `--limit N` (`0` for all rows), `--sort COL --sort COL2`
 with `--desc`, `-o FILE.csv|.json|.parquet`, and `--all` on `allocations`,
@@ -135,6 +137,8 @@ buttons that swap the y-axis rather than adding a second one:
 | Project × month heatmap | Which projects were set up and never used — in node hours, or against each project's own award |
 | Total per project | Whether utilisation rests on two research groups (log axis) |
 | Engagement | Projects set up vs projects running vs people running |
+| Project quota heatmap | How full each project's shared disk got each month — as % of quota, or as a size |
+| Personal quota heatmap | The same per person, switching between home and scratch |
 
 Plus three more if a SLURM capture is present (see below): the job-size
 distribution with a month slider, queue wait against what jobs *requested*, and
@@ -152,6 +156,43 @@ snapshot was taken in is partial**, so it is hatched in the first figure and
 excluded from every average. And **mean monthly allocation is a construction**,
 not something the portal reports: credits are granted as a lump for a period,
 and this spreads them evenly across it.
+
+### Disk quotas
+
+`openportal-project-storage-reports` is the only endpoint that carries them, and
+it carries both halves: a project-wide quota on `projects`, and a per-person one
+on `home` and `scratch`. The limits it reports agree with what `lfs quota` says
+on the machine itself, so it is a trustworthy source for *what you were given*.
+
+Two things about the shape are worth knowing before reading the figures.
+
+**Disk is a level, not a flow.** Node hours are consumed during a month and sum
+over it; a quota reading is a measurement of how full something is right now.
+There is nothing to add up, so a month has to be summarised by picking a
+statistic — hence the `Peak` / `End` / `Median` buttons, defaulting to peak,
+which is the reading that decides whether writes actually failed. A mean is
+deliberately not offered: averaging a slowly drifting level is close to
+meaningless, and it hides the peak.
+
+**Colour is a percentage, not a size.** Every project on the machine holds the
+same limit, so a size ramp would mostly redraw the limit rather than the
+pressure, and home is a hundredth the size of scratch so the two are never
+comparable as sizes anyway. The ramp is linear from empty to full and ends in
+red, because the only part anyone acts on is the top of that range. Sizes are on
+every tooltip, and the project figure offers them as a view.
+
+The daily series behind all this is deliberately *not* shipped: a year of it is
+tens of thousands of readings, which is too much to embed in a self-contained
+page for a question nobody asks per-day. The monthly reduction is around a
+hundred cells and answers the same question.
+
+> **Check `Last read` before quoting any of it.** These readings are only as
+> current as the collector behind them, which is a different thing from how
+> fresh your snapshot is: the endpoint can go months without a new reading while
+> everything else in the pull is same-day. Both figures mark a month that was
+> not observed on every day with a `*`, the table gives the date of each
+> reading, and the page says so in words when the newest one is more than six
+> weeks old.
 
 ### The same report, in a browser
 

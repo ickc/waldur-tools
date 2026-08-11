@@ -111,7 +111,7 @@ in `report.js`, and the `chrome.permissions` request beside it.
 
 ## What it does and does not carry
 
-Six figures, against the eight `waldur-tools viz` produces.
+Eight figures, against the ten `waldur-tools viz` produces.
 
 | Figure | Here | Why |
 | --- | --- | --- |
@@ -121,6 +121,8 @@ Six figures, against the eight `waldur-tools viz` produces.
 | Total per project | ✅ | |
 | Engagement | ✅ | |
 | Demand: jobs and queue wait | ✅ | from `openportal-project-usage-reports` |
+| Project quota heatmap | ✅ | from `openportal-project-storage-reports` |
+| Personal quota heatmap | ✅ | the same endpoint, `home` and `scratch` |
 | Job-size distribution | ❌ | needs `sacct` |
 | Queue wait by what was requested | ❌ | needs `sacct` |
 | Spread of waits per month | ❌ | needs `sacct` |
@@ -154,8 +156,9 @@ is about a hundred rows. So the page is built in three waves:
    so the round trips overlap. Every month that lands redraws the figures, at
    most once every 300ms.
 3. **The tail in the background** — the daily usage reports behind the demand
-   figure, and the associations behind the "people with access" denominator.
-   Neither blocks anything above it.
+   figure, the storage reports behind the two quota figures, and the
+   associations behind the "people with access" denominator. None of them blocks
+   anything above it.
 
 Complete months are then kept in IndexedDB. A calendar month that has ended is
 not written to again, so a cached copy stays correct indefinitely; the month in
