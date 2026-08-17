@@ -193,6 +193,17 @@ hundred cells and answers the same question.
 > not observed on every day with a `*`, the table gives the date of each
 > reading, and the page says so in words when the newest one is more than six
 > weeks old.
+>
+> That is not a hypothetical risk. The collector has already stopped once, in an
+> upgrade of the OpenPortal agents that broke it **silently** — the endpoint kept
+> answering, kept its schema, and simply stopped gaining months, while every
+> other endpoint in the same pull stayed same-day. Nothing in the API
+> distinguishes "no new readings" from "nothing to report", and a re-pull of a
+> dead collector returns a byte-identical table rather than an error, so the
+> staleness check is the only thing standing between you and quoting a disk as
+> it stood months ago. `openportal-project-usage-reports` is the useful control:
+> it comes from the same agents, so if it is current and storage is not, the
+> break is on the collector rather than on your token or your snapshot.
 
 ### The same report, in a browser
 

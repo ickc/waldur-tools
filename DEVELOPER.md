@@ -610,6 +610,30 @@ A snapshot taken before this endpoint was pulled simply has no file for it, and
 every entry point here returns an empty frame rather than raising, so an old
 snapshot loses two figures instead of the whole report.
 
+#### The collector fails silently, and has
+
+This endpoint is the only one here whose freshness is independent of the pull,
+and the failure mode is worth stating because it has actually happened: an
+upgrade of the OpenPortal agents stopped the storage collector without
+surfacing anything. The endpoint went on answering, kept its schema and its
+existing rows, and merely stopped gaining months — so a re-pull returns a table
+byte-identical to the previous one rather than an error, and there is no field
+that separates "the collector is dead" from "there was nothing to report".
+
+Two consequences for anyone reading this code:
+
+- **A stale month is left stale rather than repaired.** The last month the
+  collector touched is frozen in the *month in progress* shape described above —
+  it never gains a `daily_reports` dictionary and its top-level `generated_at`
+  never advances. That is indistinguishable, structurally, from a month that is
+  legitimately still open, which is exactly why `_storage_staleness()` keys off
+  the newest reading's age rather than off the blob's shape.
+- **`openportal-project-usage-reports` is the control.** It is fed by the same
+  agents, so comparing the two separates a broken collector from a broken pull:
+  both stale means suspect the snapshot or the token, usage current and storage
+  stale means the collector, and that distinction is the first thing to
+  establish before raising it with the portal team.
+
 ## The visual report
 
 `waldur_tools.viz` builds the HTML page. `render()` returns a string rather than
