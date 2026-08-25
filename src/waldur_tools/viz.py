@@ -1917,8 +1917,14 @@ def render(
         ),
     ]
 
-    storage_monthly = reports.storage_monthly(source)
-    storage_now = reports.storage(source)
+    # One parse of the storage endpoint, scoped to the same organisation as
+    # every other figure on the page: the endpoint reports every project the
+    # token can see, and a report headed by one customer's name must not mix
+    # another's disks into its charts. Both views come off the same read, so
+    # the table under a figure cannot describe a different pull from it.
+    storage_samples = reports.storage_samples(source, customer=customer)
+    storage_monthly = reports.storage_by_month(storage_samples)
+    storage_now = reports.storage_now(storage_samples)
     project_quota = figure_storage_projects(storage_monthly)
     user_quota = figure_storage_users(storage_monthly)
     stale = _storage_staleness(storage_now)

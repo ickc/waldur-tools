@@ -967,7 +967,12 @@ def humanise_bytes(value: object) -> str:
     return f"{size:,.2f} {_BYTE_UNITS[-1]}"
 
 
-def storage_samples(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFrame:
+def storage_samples(
+    source: Snapshot | WaldurClient,
+    *,
+    customer: str | None = None,
+    scope: bool = True,
+) -> pl.DataFrame:
     """Every quota reading in the snapshot, one row per scope, filesystem and sample.
 
     ``openportal-project-storage-reports`` returns one row per project, resource
@@ -993,7 +998,13 @@ def storage_samples(source: Snapshot | WaldurClient, *, scope: bool = True) -> p
     ``fill_pct`` is ``usage_bytes`` over ``limit_bytes``, the only figure that
     compares across filesystems whose limits differ by two orders of magnitude.
     It is null where the limit is missing or zero rather than dividing by it.
+
+    ``customer`` narrows the scope further to one organisation's projects, the
+    way :func:`monthly` does, and like there it means nothing without the
+    scope: ``scope=False`` is the whole machine, and drops it.
     """
+    if not scope:
+        customer = None
     # Snapshots taken before storage was pulled simply do not have the file,
     # and every caller here degrades to "no storage figures" rather than
     # failing -- re-snapshotting is a nine-minute job to ask of someone who
@@ -1057,8 +1068,10 @@ def storage_samples(source: Snapshot | WaldurClient, *, scope: bool = True) -> p
         .sort("observed_at", "kind", "project_code", "username", "filesystem")
     )
     if scope:
-        codes = in_scope(source)["project_code"].to_list()
-        samples = samples.filter(pl.col("project_code").is_in(codes))
+        projects = in_scope(source)
+        if customer is not None and "customer_name" in projects.columns:
+            projects = projects.filter(pl.col("customer_name") == customer)
+        samples = samples.filter(pl.col("project_code").is_in(projects["project_code"].to_list()))
     return samples
 
 
@@ -1098,7 +1111,17 @@ def storage(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFr
     the same thing as how fresh the snapshot is, and a row whose reading is
     months old should be read as history rather than as the state of the disk.
     """
-    samples = storage_samples(source, scope=scope)
+    return storage_now(storage_samples(source, scope=scope))
+
+
+def storage_now(samples: pl.DataFrame) -> pl.DataFrame:
+    """:func:`storage`, over a frame of samples that has already been parsed.
+
+    Split out so a caller wanting both storage views -- the visual report wants
+    the heatmap and the table under it -- can pay for one parse of the endpoint
+    and one read of the allocations rather than two, and so that the two views
+    are guaranteed to have come from the same read.
+    """
     if samples.is_empty():
         return samples.drop("month")
     keys = ["kind", "project_code", "username", "filesystem"]
@@ -1155,7 +1178,14 @@ def storage_monthly(source: Snapshot | WaldurClient, *, scope: bool = True) -> p
     date, and a month can be short of readings at either end: collection
     starting mid-month, stopping mid-month, or simply missing a day.
     """
-    samples = storage_samples(source, scope=scope)
+    return storage_by_month(storage_samples(source, scope=scope))
+
+
+def storage_by_month(samples: pl.DataFrame) -> pl.DataFrame:
+    """:func:`storage_monthly`, over a frame of samples already parsed.
+
+    The counterpart of :func:`storage_now`, and split out for the same reason.
+    """
     if samples.is_empty():
         return pl.DataFrame(
             schema={

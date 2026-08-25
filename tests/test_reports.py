@@ -617,6 +617,37 @@ def test_the_current_view_is_fullest_first_and_most_recent(storage_snapshot):
     assert str(alice["date"]) == "2026-02-18"
 
 
+def test_storage_can_be_narrowed_to_one_organisation(tmp_path, allocations, storage_reports):
+    """Scope keeps every project the *token* administers, across customers.
+
+    On a multi-tenant portal that is more than one organisation, and a report
+    headed by one customer's name must not draw another's disks beside them.
+    """
+    elsewhere = {
+        **allocations[0],
+        "url": f"{API_URL}/api/openportal-allocations/zzz/",
+        "uuid": "zzz",
+        "project_name": "Elsewhere",
+        "project_uuid": "pz",
+        "customer_name": "Other Uni",
+        "groupname": "brics.zzz9",
+        "backend_id": "zzz9.brics",
+    }
+    snap = Snapshot.create(tmp_path, "two-customers")
+    snap.write("openportal-allocations", to_frame([*allocations, elsewhere]))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
+    snap.write_meta({})
+
+    administered = set(reports.storage_samples(snap)["project_code"].to_list())
+    assert administered == {"abc1", "abc2", "zzz9"}
+    ours = set(reports.storage_samples(snap, customer="UKRI")["project_code"].to_list())
+    assert ours == {"abc1", "abc2"}
+    # `scope=False` is the whole machine by definition, so naming a customer
+    # inside it would be two filters contradicting each other.
+    everyone = reports.storage_samples(snap, customer="UKRI", scope=False)
+    assert set(everyone["project_code"].to_list()) == {"abc1", "abc2", "zzz9"}
+
+
 def test_storage_survives_a_snapshot_that_never_pulled_it(tmp_path, allocations):
     """Older snapshots predate the endpoint, and must not fail the whole report."""
     snap = Snapshot.create(tmp_path, "old")

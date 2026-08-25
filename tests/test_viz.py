@@ -372,6 +372,54 @@ def test_quota_figures_carry_their_own_ramp(snapshot):
         assert figure.data[0].meta == {"ramp": "fill"}
 
 
+def test_the_quota_figures_keep_the_report_to_its_own_organisation(
+    tmp_path,
+    allocations,
+    associations,
+    accounting_summary,
+    usage_reports,
+    storage_reports,
+    user_usage_rows,
+    users,
+    projects,
+    customers,
+):
+    """Storage is scoped the way every other figure on the page is.
+
+    The endpoint reports every project the token can see, which on this portal
+    spans more than one organisation. A page headed by one customer's name that
+    drew another's disks would be wrong in the way that is hardest to notice:
+    the row labels are project codes, and nothing on the figure says whose.
+    """
+    elsewhere = {
+        **allocations[0],
+        "url": f"{allocations[0]['url']}elsewhere/",
+        "uuid": "zzz",
+        "project_name": "Elsewhere",
+        "project_uuid": "pz",
+        "customer_name": "Other Uni",
+        "groupname": "brics.zzz9",
+        "backend_id": "zzz9.brics",
+    }
+    snap = Snapshot.create(tmp_path, "two-customers")
+    snap.write("users", to_frame(users))
+    snap.write("customers", to_frame(customers))
+    snap.write("projects", to_frame(projects))
+    snap.write("openportal-allocations", to_frame([*allocations, elsewhere]))
+    snap.write("openportal-associations", to_frame(associations))
+    snap.write("openportal-accounting-summary", to_frame(accounting_summary))
+    snap.write("openportal-project-usage-reports", to_frame(usage_reports))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
+    snap.write("openportal-allocation-user-usage", to_frame(user_usage_rows))
+    snap.write_meta({})
+
+    page = viz.render(snap, customer="UKRI")
+    assert "zzz9" not in markup_only(page)
+    # The other organisation's projects are administered by this token, so
+    # widening the report to every project it can see does draw them.
+    assert "zzz9" in markup_only(viz.render(snap, customer=None))
+
+
 def test_a_month_short_of_readings_is_marked_on_the_axis(snapshot):
     """A column standing on one reading is not comparable with one on thirty."""
     monthly = reports.storage_monthly(snapshot)

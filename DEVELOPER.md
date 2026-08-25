@@ -578,7 +578,15 @@ Two more properties of the source that the parsing has to respect:
   depend on that reading; `fill_pct` divides two figures carrying the same unit.
 
 `storage_samples()` is the shared tidy frame both reports and both figures are
-built from — one row per scope, filesystem and sample.
+built from — one row per scope, filesystem and sample. It takes the same
+`scope` and `customer` filters as the monthly reports, and the visual report
+passes its own `customer` down: the endpoint answers for every project the
+token administers, which spans more than one organisation, and a page headed by
+one customer's name must not draw another's disks. `storage_now()` and
+`storage_by_month()` are the two aggregations over an already-parsed frame, so
+a caller wanting both — the visual report wants the heatmap and the table under
+it — pays for one read of the endpoint rather than two, and cannot end up with
+a figure and a table describing different pulls.
 
 | Column | Derivation |
 | --- | --- |
