@@ -565,6 +565,29 @@ def test_a_reading_outside_its_month_is_dropped(storage_snapshot):
     assert str(abc2["date"][0]) == "2025-01-31"
 
 
+def test_the_end_of_a_month_is_the_last_sample_and_not_the_last_readable_one(
+    storage_snapshot,
+):
+    """`end` answers "what was it on the last reading", nulls included.
+
+    Bob's home was read three days running and only the last of them came back
+    unparseable. Reporting the 30th as the end would put a stale level beside a
+    limit taken from the 31st -- a row internally inconsistent with itself, and
+    silently so, since nothing on the figure says which day each half came from.
+    """
+    monthly = reports.storage_monthly(storage_snapshot)
+    row = monthly.filter(
+        (pl.col("month") == date(2025, 1, 1))
+        & (pl.col("username") == "bob")
+        & (pl.col("filesystem") == "home")
+    ).row(0, named=True)
+    assert row["end_fill_pct"] is None
+    assert row["end_bytes"] is None
+    assert row["limit_bytes"] is None
+    # The readable days still carry the peak and the median.
+    assert row["peak_bytes"] == pytest.approx(95 * 1024**3)
+
+
 def test_a_limit_that_is_not_a_size_blanks_the_percentage(storage_snapshot):
     """Null, not zero and not a division by it: the quota is simply unknown."""
     current = reports.storage(storage_snapshot)

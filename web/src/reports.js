@@ -937,15 +937,19 @@ export function storageMonthly(samples) {
         fills: [],
         usages: [],
         days: new Set(),
-        limit_bytes: null,
+        last: null,
         samples: 0,
       };
       buckets.set(key, bucket);
     }
+    // Peak and median are over the readings that parsed; `end` is the last
+    // sample whatever it held. Dropping an unreadable final reading from the
+    // end view would report a stale level beside the newest limit, and polars'
+    // `last()` on the other side of the parity tests keeps the null.
     if (row.fill_pct !== null) bucket.fills.push(row.fill_pct);
     if (row.usage_bytes !== null) bucket.usages.push(row.usage_bytes);
     bucket.days.add(row.date);
-    bucket.limit_bytes = row.limit_bytes;
+    bucket.last = row;
     bucket.samples += 1;
   }
 
@@ -957,12 +961,12 @@ export function storageMonthly(samples) {
       username: bucket.username,
       filesystem: bucket.filesystem,
       peak_fill_pct: bucket.fills.length ? Math.max(...bucket.fills) : null,
-      end_fill_pct: bucket.fills.length ? bucket.fills[bucket.fills.length - 1] : null,
+      end_fill_pct: bucket.last.fill_pct,
       median_fill_pct: median(bucket.fills),
       peak_bytes: bucket.usages.length ? Math.max(...bucket.usages) : null,
-      end_bytes: bucket.usages.length ? bucket.usages[bucket.usages.length - 1] : null,
+      end_bytes: bucket.last.usage_bytes,
       median_bytes: median(bucket.usages),
-      limit_bytes: bucket.limit_bytes,
+      limit_bytes: bucket.last.limit_bytes,
       days_observed: bucket.days.size,
       samples: bucket.samples,
       is_partial: bucket.days.size < daysInMonth(bucket.month),

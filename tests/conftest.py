@@ -392,7 +392,25 @@ def storage_reports():
     - A reading dated outside the month its row claims, which must be dropped
       rather than filed under the wrong column.
     - A project this token does not administer, for ``scope`` to remove.
+    - A quota whose *newest* reading is unreadable while older ones parsed, so
+      the end-of-month statistic has to answer "unknown" rather than repeat the
+      last figure it could read.
     """
+    # The last January reading of bob's home came back with neither figure in a
+    # shape the parser recognises. The 29th and the 30th are readable, so this
+    # is the only thing separating "the end of the month" from "the last thing
+    # we could read", and the two must not be confused.
+    january_shared = _quotas(
+        "3.10 TB",
+        "31.00 GB",
+        "710.00 GB",
+        "96.00 GB",
+        "2025-01-31T10:15:00.000000000Z",
+    )
+    january_shared["user_quotas"]["bob.abc1.brics"]["home"] = {
+        "limit": "unknown",
+        "usage": "unknown",
+    }
     return [
         {
             "id": 1,
@@ -433,13 +451,7 @@ def storage_reports():
             "project_identifier": "abc1.brics",
             "resource": "brics.i3.clusters.shared",
             "report": {
-                **_quotas(
-                    "3.10 TB",
-                    "31.00 GB",
-                    "710.00 GB",
-                    "96.00 GB",
-                    "2025-01-31T10:15:00.000000000Z",
-                ),
+                **january_shared,
                 "daily_reports": {
                     "2025-01-29": _quotas(
                         "1.10 TB",

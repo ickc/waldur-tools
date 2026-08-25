@@ -438,8 +438,8 @@
           },
           "bob.abc1.brics": {
             "home": {
-              "limit": "100.00 GB",
-              "usage": "96.00 GB"
+              "limit": "unknown",
+              "usage": "unknown"
             }
           }
         }

@@ -319,23 +319,6 @@
     },
     {
       "days_observed": 3,
-      "end_bytes": 103079215104.0,
-      "end_fill_pct": 96.0,
-      "filesystem": "home",
-      "is_partial": true,
-      "kind": "user",
-      "limit_bytes": 107374182400.0,
-      "median_bytes": 97173635072.0,
-      "median_fill_pct": 90.5,
-      "month": "2025-01",
-      "peak_bytes": 103079215104.0,
-      "peak_fill_pct": 96.0,
-      "project_code": "abc1",
-      "samples": 6,
-      "username": "bob"
-    },
-    {
-      "days_observed": 3,
       "end_bytes": 33285996544.0,
       "end_fill_pct": 31.0,
       "filesystem": "home",
@@ -384,6 +367,23 @@
       "project_code": "abc1",
       "samples": 6,
       "username": "alice"
+    },
+    {
+      "days_observed": 3,
+      "end_bytes": null,
+      "end_fill_pct": null,
+      "filesystem": "home",
+      "is_partial": true,
+      "kind": "user",
+      "limit_bytes": null,
+      "median_bytes": 96636764160.0,
+      "median_fill_pct": 90.0,
+      "month": "2025-01",
+      "peak_bytes": 102005473280.0,
+      "peak_fill_pct": 95.0,
+      "project_code": "abc1",
+      "samples": 6,
+      "username": "bob"
     }
   ]
 }

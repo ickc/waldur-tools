@@ -297,6 +297,19 @@ def test_the_fixture_exercises_what_it_claims_to(snapshot):
     # Peak and median differ, so a figure defaulting to the wrong one is visible.
     assert january["peak_fill_pct"] != january["median_fill_pct"]
 
+    # The end of a month is the last sample, not the last readable one: bob's
+    # home was read three days running and only the last came back unparseable,
+    # so `end` has to answer "unknown" rather than repeat the 30th beside a
+    # limit taken from the 31st.
+    bob = next(
+        row
+        for row in monthly_storage
+        if row["month"] == "2025-01" and row["username"] == "bob" and row["filesystem"] == "home"
+    )
+    assert bob["end_fill_pct"] is None
+    assert bob["end_bytes"] is None
+    assert bob["peak_bytes"] is not None
+
     # A limit that is not a size blanks the percentage rather than dividing.
     unlimited = [row for row in monthly_storage if row["project_code"] == "abc2"]
     assert unlimited and all(row["peak_fill_pct"] is None for row in unlimited)
