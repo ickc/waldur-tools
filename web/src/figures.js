@@ -735,6 +735,19 @@ function storageHeatmap(rows, { views, heading, leftMargin }) {
     ? [Math.log10(Math.min(...sizes) + 1), Math.log10(Math.max(...sizes) + 1)]
     : [0, 1];
 
+  /**
+   * Which named ramp a view belongs on, and why it is not always the same.
+   *
+   * The rule the rest of the page follows: a bounded fraction is linear and
+   * finishes in red, an unbounded magnitude is logarithmic and stays one hue.
+   * A fill percentage is the first; the size views are `log10` bytes with no
+   * ceiling, so they are the second. Leaving them on the quota ramp would
+   * paint a large project red for being large, which is the opposite of what
+   * the colour means everywhere else on the figure.
+   */
+  const rampName = (absolute) => (absolute ? 'activity' : 'fill');
+  const rampScale = (absolute) => colorscale(absolute ? RAMP_LIGHT : RAMP_FILL_LIGHT);
+
   const first = storageBar(views[0].absolute, sizeRange);
 
   return {
@@ -747,7 +760,7 @@ function storageHeatmap(rows, { views, heading, leftMargin }) {
         text: matrices[0][1],
         zmin: first.zmin,
         zmax: first.zmax,
-        colorscale: colorscale(RAMP_FILL_LIGHT),
+        colorscale: rampScale(views[0].absolute),
         hovertemplate: '%{y}<br>%{x}: %{text}<extra></extra>',
         xgap: 2,
         ygap: 2,
@@ -759,7 +772,7 @@ function storageHeatmap(rows, { views, heading, leftMargin }) {
           outlinewidth: 0,
           thickness: 12,
         },
-        meta: { ramp: 'fill' },
+        meta: { ramp: rampName(views[0].absolute) },
       },
     ],
     layout: layout({
@@ -781,6 +794,11 @@ function storageHeatmap(rows, { views, heading, leftMargin }) {
               'colorbar.title.text': bar.title,
               'colorbar.tickvals': [bar.tickvals],
               'colorbar.ticktext': [bar.ticktext],
+              // The scale here can only be the one that was current when the
+              // figure was built; `paint` re-asserts it in whichever theme is
+              // showing, keyed off the ramp's name.
+              colorscale: [rampScale(view.absolute)],
+              'meta.ramp': rampName(view.absolute),
             },
             {},
           ];

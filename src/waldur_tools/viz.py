@@ -703,6 +703,22 @@ def _storage_heatmap(
             "zmax": FILL_CEILING,
         }
 
+    def ramp(absolute: bool) -> str:
+        """Which named ramp a view belongs on, and why it is not always the same.
+
+        The rule the rest of the page follows: a bounded fraction is linear and
+        finishes in red, an unbounded magnitude is logarithmic and stays one
+        hue. A fill percentage is the first; the size views are ``log10`` bytes
+        with no ceiling, so they are the second. Leaving them on the quota ramp
+        would paint a large project red for being large, which is the opposite
+        of what the colour means everywhere else on the figure.
+        """
+        return "activity" if absolute else "fill"
+
+    def scale(absolute: bool) -> list[list[Any]]:
+        """The light-mode scale for a view. The repaint swaps it by name."""
+        return _scale(RAMP_LIGHT if absolute else RAMP_FILL_LIGHT)
+
     first = bar(views[0][3])
     figure = go.Figure(
         go.Heatmap(
@@ -712,7 +728,7 @@ def _storage_heatmap(
             text=matrices[0][1],
             zmin=first["zmin"],
             zmax=first["zmax"],
-            colorscale=_scale(RAMP_FILL_LIGHT),
+            colorscale=scale(views[0][3]),
             hovertemplate="%{y}<br>%{x}: %{text}<extra></extra>",
             xgap=2,
             ygap=2,
@@ -724,7 +740,7 @@ def _storage_heatmap(
                 "outlinewidth": 0,
                 "thickness": 12,
             },
-            meta={"ramp": "fill"},
+            meta={"ramp": ramp(views[0][3])},
         )
     )
 
@@ -740,6 +756,11 @@ def _storage_heatmap(
                     "colorbar.title.text": bar(absolute)["title"],
                     "colorbar.tickvals": [bar(absolute)["tickvals"]],
                     "colorbar.ticktext": [bar(absolute)["ticktext"]],
+                    # The scale here can only be the one that was current when
+                    # the page was built; the repaint below re-asserts it in
+                    # whichever theme is showing, keyed off the ramp's name.
+                    "colorscale": [scale(absolute)],
+                    "meta.ramp": ramp(absolute),
                 },
                 {},
             ]
@@ -1676,6 +1697,27 @@ const FILL = __FILL__;
 
 function shade(hex, dark) { const m = dark ? SWAP : UNSWAP; return m[hex] || hex; }
 
+function rampFor(name, dark) {
+  return (RAMPS[name] || RAMPS.activity)[dark ? 'dark' : 'light'];
+}
+
+// A view button can only carry the colourscale that was current when the page
+// was built, and the quota figures switch ramps between their fill views and
+// their size views. So every restyle re-asserts the ramp the trace now names,
+// in the theme now showing. Keyed on what was last applied, so re-asserting a
+// ramp cannot set off another round of this.
+function fixRamps(div, dark) {
+  if (!div.data) return;
+  div._ramps = div._ramps || {};
+  div.data.forEach((trace, index) => {
+    if (!trace.meta || !trace.meta.ramp) return;
+    const key = trace.meta.ramp + (dark ? '-dark' : '-light');
+    if (div._ramps[index] === key) return;
+    div._ramps[index] = key;
+    Plotly.restyle(div, {colorscale: [rampFor(trace.meta.ramp, dark)]}, [index]);
+  });
+}
+
 function paint(dark) {
   const c = CHROME, i = dark ? 1 : 0;
   document.querySelectorAll('.plotly-graph-div').forEach(div => {
@@ -1685,8 +1727,9 @@ function paint(dark) {
       if (trace.meta && trace.meta.ramp) {
         // Named rather than assumed: activity is one hue, the quota ramps end
         // in red, and repainting must not swap one figure's scale for another's.
-        const ramp = RAMPS[trace.meta.ramp] || RAMPS.activity;
-        style.colorscale = [ramp[dark ? 'dark' : 'light']];
+        div._ramps = div._ramps || {};
+        div._ramps[index] = trace.meta.ramp + (dark ? '-dark' : '-light');
+        style.colorscale = [rampFor(trace.meta.ramp, dark)];
         style['colorbar.tickfont.color'] = [c.muted[i]];
         style['colorbar.title.font.color'] = [c.ink_soft[i]];
       } else {
@@ -1701,6 +1744,11 @@ function paint(dark) {
       }
       if (Object.keys(style).length) Plotly.restyle(div, style, [index]);
     });
+    if (!div._rampWatch && div.on) {
+      div._rampWatch = true;
+      div.on('plotly_restyle', () => fixRamps(
+        div, document.documentElement.getAttribute('data-theme') === 'dark'));
+    }
     // Sliders carry their own chrome, and relayouting a path that does not
     // exist throws -- so this is added only for the figures that have one.
     if (div.layout && div.layout.sliders && div.layout.sliders.length) {

@@ -106,6 +106,33 @@ function shade(hex, dark) {
   return map[hex] ?? hex;
 }
 
+/** The light or dark form of a named ramp, as a plotly colorscale. */
+function rampFor(name, dark) {
+  const ramp = RAMPS[name] ?? RAMPS.activity;
+  return colorscale(dark ? ramp.dark : ramp.light);
+}
+
+/**
+ * Re-assert the ramp a trace names, in the theme now showing.
+ *
+ * A view button can only carry the colourscale that was current when the
+ * figure was built, and the quota figures switch ramps between their fill
+ * views and their size views. So every restyle puts the scale back to what
+ * the trace's `meta.ramp` and the current theme say between them. Keyed on
+ * what was last applied, so re-asserting a ramp cannot set off another round.
+ */
+function fixRamps(div, dark) {
+  if (!div.data) return;
+  div._ramps = div._ramps ?? {};
+  div.data.forEach((trace, index) => {
+    if (!trace.meta?.ramp) return;
+    const key = `${trace.meta.ramp}-${dark ? 'dark' : 'light'}`;
+    if (div._ramps[index] === key) return;
+    div._ramps[index] = key;
+    Plotly.restyle(div, { colorscale: [rampFor(trace.meta.ramp, dark)] }, [index]);
+  });
+}
+
 /**
  * Repaint every rendered figure for the given mode.
  *
@@ -122,8 +149,9 @@ export function paint(dark) {
       if (trace.meta && trace.meta.ramp) {
         // Named rather than assumed: activity is one hue, the quota ramps end
         // in red, and repainting must not swap one figure's scale for another's.
-        const ramp = RAMPS[trace.meta.ramp] ?? RAMPS.activity;
-        style.colorscale = [colorscale(dark ? ramp.dark : ramp.light)];
+        div._ramps = div._ramps ?? {};
+        div._ramps[position] = `${trace.meta.ramp}-${dark ? 'dark' : 'light'}`;
+        style.colorscale = [rampFor(trace.meta.ramp, dark)];
         style['colorbar.tickfont.color'] = [CHROME.muted[index]];
         style['colorbar.title.font.color'] = [CHROME.ink_soft[index]];
       } else {
@@ -140,6 +168,10 @@ export function paint(dark) {
       }
       if (Object.keys(style).length) Plotly.restyle(div, style, [position]);
     });
+    if (!div._rampWatch && div.on) {
+      div._rampWatch = true;
+      div.on('plotly_restyle', () => fixRamps(div, currentTheme() === 'dark'));
+    }
     Plotly.relayout(div, {
       paper_bgcolor: CHROME.surface[index],
       plot_bgcolor: CHROME.surface[index],

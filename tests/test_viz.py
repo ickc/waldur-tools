@@ -420,6 +420,38 @@ def test_the_quota_figures_keep_the_report_to_its_own_organisation(
     assert "zzz9" in markup_only(viz.render(snap, customer=None))
 
 
+def test_the_size_views_leave_the_quota_ramp_behind(snapshot):
+    """A bounded fraction ends in red; an unbounded magnitude stays one hue.
+
+    The size views are `log10` bytes with no ceiling, so drawing them on the
+    quota ramp would paint a large project red for being large -- the opposite
+    of what that colour means on every other view of the same figure. The ramp
+    is switched by name as well as by value, so a theme repaint keeps it.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_projects(monthly)
+    assert figure.data[0].meta == {"ramp": "fill"}
+    assert list(figure.data[0].colorscale[-1]) == [1.0, viz.RAMP_FILL_LIGHT[-1]]
+
+    buttons = {button.label: button.args[0] for button in figure.layout.updatemenus[0].buttons}
+    for label in ("Peak", "End", "Median"):
+        assert buttons[label]["meta.ramp"] == "fill"
+        assert buttons[label]["colorscale"][0][-1][1] == viz.RAMP_FILL_LIGHT[-1]
+    for label in ("Peak size", "End size", "Median size"):
+        assert buttons[label]["meta.ramp"] == "activity"
+        assert buttons[label]["colorscale"][0][-1][1] == viz.RAMP_LIGHT[-1]
+
+
+def test_the_page_puts_a_switched_ramp_back_in_the_readers_theme(page):
+    """The buttons carry a light-mode scale; the reader may not be in one.
+
+    A button's arguments are fixed when the page is written, so the repaint has
+    to re-assert the ramp on every restyle rather than only on a theme change.
+    """
+    assert "function fixRamps(" in page
+    assert "plotly_restyle" in page
+
+
 def test_a_month_short_of_readings_is_marked_on_the_axis(snapshot):
     """A column standing on one reading is not comparable with one on thirty."""
     monthly = reports.storage_monthly(snapshot)

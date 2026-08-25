@@ -23,7 +23,7 @@ import {
   figureStorageProjects, figureStorageUsers, figureTotalsByProject,
 } from '../src/figures.js';
 import { STALE_DAYS, reconcileTable, storageStaleness } from '../src/page.js';
-import { CHROME, SERIES } from '../src/palette.js';
+import { CHROME, RAMP_FILL_LIGHT, RAMP_LIGHT, SERIES } from '../src/palette.js';
 import * as reports from '../src/reports.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -260,6 +260,27 @@ describe('the quota heatmaps', () => {
   it('carries its own ramp, so a repaint cannot hand it the activity blues', () => {
     assert.equal(figureStorageProjects(storageByMonth).data[0].meta.ramp, 'fill');
     assert.equal(figureStorageUsers(storageByMonth).data[0].meta.ramp, 'fill');
+  });
+
+  it('leaves the quota ramp behind on the size views', () => {
+    // A bounded fraction is linear and ends in red; an unbounded magnitude is
+    // logarithmic and stays one hue. The size views are log10 bytes with no
+    // ceiling, so the quota ramp would paint a large project red for being
+    // large -- the opposite of what that colour means on every other view of
+    // the same figure. Switched by name as well as by value, so that a theme
+    // repaint, which reads the name, keeps it.
+    const figure = figureStorageProjects(storageByMonth);
+    const buttons = new Map(
+      figure.layout.updatemenus[0].buttons.map((button) => [button.label, button.args[0]]),
+    );
+    for (const label of ['Peak', 'End', 'Median']) {
+      assert.equal(buttons.get(label)['meta.ramp'], 'fill');
+      assert.equal(buttons.get(label).colorscale[0].at(-1)[1], RAMP_FILL_LIGHT.at(-1));
+    }
+    for (const label of ['Peak size', 'End size', 'Median size']) {
+      assert.equal(buttons.get(label)['meta.ramp'], 'activity');
+      assert.equal(buttons.get(label).colorscale[0].at(-1)[1], RAMP_LIGHT.at(-1));
+    }
   });
 
   it('marks a month that was not observed on every day', () => {

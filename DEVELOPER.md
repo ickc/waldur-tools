@@ -720,11 +720,19 @@ misleads. A change that undoes one of them should be deliberate.
   `min(fill_pct, viz.FILL_CEILING)` on a linear 0–100 ramp
   (`RAMP_FILL_LIGHT`/`RAMP_FILL_DARK`) that leaves the blues around two thirds
   and finishes through amber into red. Every hex in it still comes from `SERIES`
-  or `CHROME`, so the theme swap needs no new pairs.
+  or `CHROME`, so the theme swap needs no new pairs. **The rule applies within a
+  figure, not to it**: the same heatmap's *size* views are `log10` bytes with no
+  ceiling, so its buttons switch the ramp back to the activity blues along with
+  the z values. Leaving them on the quota ramp would paint a large project red
+  for being large.
 - **Ramps are named, not assumed.** A trace carries `meta={"ramp": <name>}` and
   the repaint looks the name up, because there is now more than one ramp on the
   page and a repaint that assumed a single one would hand the quota figures the
-  activity blues on every theme switch.
+  activity blues on every theme switch. A button's own arguments are fixed when
+  the page is written, so they can only carry the *light* form of whichever ramp
+  they select; `fixRamps()` listens for `plotly_restyle` and puts the scale back
+  to what the trace's name and the reader's theme say between them. It keys on
+  the last ramp it applied per trace, so re-asserting one cannot loop.
 - **Where controls would need two dimensions, the row is flattened rather than
   stacked.** Plotly's button groups do not compose: a second row of buttons
   issues its own `update` and silently resets the first, so `Scratch` followed
