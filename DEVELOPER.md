@@ -1023,9 +1023,14 @@ git tag web-v0.3.0
 git push origin web-v0.3.0
 ```
 
-The tag is prefixed because this repository has two shippable things on
-separate version lines, and an unprefixed `v0.3.0` would silently claim to be
-this package's release too.
+The tag is prefixed because this repository has two shippable things, and an
+unprefixed `v0.3.0` would silently claim to release the Python package too. The
+prefix says *which artefact*, not which version line: the two are deliberately
+kept at the same number. `web/manifest.json`, the `version` in `pyproject.toml`
+and `waldur_tools.__version__` move together, even when a release only changed
+one side. One number describing the whole repository is easier to hold in your
+head than two that drift, and the cost is an occasional bump that means nothing
+on one of them.
 
 `web/manifest.json` is the only place the extension's version is written down.
 The workflow reads it, refuses a tag that disagrees, and names the asset from
