@@ -909,6 +909,10 @@ _SIZE_UNITS = {
     "PB": 1024**5,
 }
 
+#: The same units, smallest first, for writing a size back out. Taken from the
+#: table above rather than repeated, so parsing and rendering cannot drift.
+_BYTE_UNITS = tuple(_SIZE_UNITS)
+
 _SIZE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([KMGTP]?B)\s*$", re.IGNORECASE)
 
 #: The filesystems the collector reports a project-wide quota for, as opposed to
@@ -954,11 +958,13 @@ def humanise_bytes(value: object) -> str:
     if not isinstance(value, int | float):
         return ""
     size = float(value)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(size) < 1024 or unit == "TB":
+    # Every unit but the last: the loop divides its way down to petabytes and
+    # then stops, since there is nothing above them to scale into.
+    for unit in _BYTE_UNITS[:-1]:
+        if abs(size) < 1024:
             return f"{size:,.0f} B" if unit == "B" else f"{size:,.2f} {unit}"
         size /= 1024
-    return f"{size:,.2f} PB"
+    return f"{size:,.2f} {_BYTE_UNITS[-1]}"
 
 
 def storage_samples(source: Snapshot | WaldurClient, *, scope: bool = True) -> pl.DataFrame:

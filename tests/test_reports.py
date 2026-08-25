@@ -477,6 +477,17 @@ def test_a_size_survives_the_round_trip():
     assert reports.humanise_bytes(reports._size_bytes("46.79 GB")) == "46.79 GB"
 
 
+def test_a_petabyte_is_written_as_a_petabyte():
+    """The unit the parser accepts is the unit the renderer has to reach.
+
+    A project quota measured in petabytes is not hypothetical on a machine this
+    size, and rendering it as four figures of terabytes would be exactly the
+    fourteen digits of noise this function exists to avoid.
+    """
+    assert reports.humanise_bytes(1024**5) == "1.00 PB"
+    assert reports.humanise_bytes(2.5 * 1024**5) == "2.50 PB"
+
+
 def test_the_last_day_of_a_month_comes_from_the_top_level_snapshot(storage_snapshot):
     """The daily dictionary stops a day short; the snapshot beside it does not.
 

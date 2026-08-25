@@ -323,6 +323,16 @@ describe('the quota heatmaps', () => {
   });
 });
 
+describe('sizes written back out', () => {
+  it('reaches petabytes rather than stopping at four figures of terabytes', () => {
+    // The unit the parser accepts is the unit the renderer has to reach. A
+    // project quota measured in petabytes is not hypothetical on a machine
+    // this size, and "1,024.00 TB" is precisely the noise this exists to avoid.
+    assert.equal(reports.humaniseBytes(1024 ** 5), '1.00 PB');
+    assert.equal(reports.humaniseBytes(2.5 * 1024 ** 5), '2.50 PB');
+  });
+});
+
 describe('the invoice cross-check table', () => {
   // Two routes to one number. What the table has to preserve is that the
   // reader can tell a known accounting quirk from an unstable pull, and

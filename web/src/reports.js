@@ -736,6 +736,12 @@ const SIZE_UNITS = {
   PB: 1024 ** 5,
 };
 
+/**
+ * The same units, smallest first, for writing a size back out. Taken from the
+ * table above rather than repeated, so parsing and rendering cannot drift.
+ */
+const BYTE_UNITS = Object.keys(SIZE_UNITS);
+
 const SIZE = /^\s*([0-9]*\.?[0-9]+)\s*([KMGTP]?B)\s*$/i;
 
 /** The filesystems charged to a project rather than to a person. */
@@ -759,13 +765,15 @@ export function sizeBytes(text) {
 export function humaniseBytes(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '';
   let size = value;
-  for (const unit of ['B', 'KB', 'MB', 'GB', 'TB']) {
-    if (Math.abs(size) < 1024 || unit === 'TB') {
+  // Every unit but the last: the loop divides its way down to petabytes and
+  // then stops, since there is nothing above them to scale into.
+  for (const unit of BYTE_UNITS.slice(0, -1)) {
+    if (Math.abs(size) < 1024) {
       return unit === 'B' ? `${sizeText(size, 0)} B` : `${sizeText(size, 2)} ${unit}`;
     }
     size /= 1024;
   }
-  return `${sizeText(size, 2)} PB`;
+  return `${sizeText(size, 2)} ${BYTE_UNITS[BYTE_UNITS.length - 1]}`;
 }
 
 function sizeText(value, digits) {
