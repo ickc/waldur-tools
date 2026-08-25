@@ -20,6 +20,47 @@ export function esc(value) {
 }
 
 /**
+ * How old the newest quota reading may be before the figures say so in words.
+ *
+ * Long enough that a collector between runs is not accused of being dead, short
+ * enough that a page is never quietly a season out of date. `viz.STALE_DAYS`
+ * carries the same number.
+ */
+export const STALE_DAYS = 45;
+
+/**
+ * A warning sentence when the quota readings are old, and nothing when they are not.
+ *
+ * The storage figures lag their own collector rather than the pull, so a report
+ * refreshed this morning can be showing a disk as it stood months ago -- and
+ * this endpoint is documented as continuing to answer, unchanged and without an
+ * error, after its collector has silently stopped. That is invisible on the
+ * heatmap, whose columns simply stop, and the date is otherwise only inside a
+ * collapsed table, which makes it the one thing about these figures worth
+ * saying in words. Ported from `viz._storage_staleness`.
+ */
+export function storageStaleness(current, today = new Date()) {
+  let newest = '';
+  for (const row of current) if (row.date > newest) newest = row.date;
+  if (!newest) return '';
+  const read = Date.parse(`${newest}T00:00:00Z`);
+  if (Number.isNaN(read)) return '';
+  // Both sides at UTC midnight on their own calendar day, so the answer is a
+  // whole number of days rather than a fraction of the reader's timezone.
+  const now = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  const days = Math.floor((now - read) / 86400000);
+  if (days < STALE_DAYS) return '';
+  const when = new Date(read).toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+  });
+  return (
+    `<strong>These readings stop on ${esc(when)}</strong>, ${days} days before this ` +
+    'report was drawn: the collector behind them has not reported since. Read the ' +
+    'columns as history rather than as the state of the disks now.'
+  );
+}
+
+/**
  * A frame as an HTML table -- the WCAG-clean twin of the figure above it.
  *
  * Not an optional extra: several series colours sit below 3:1 contrast on the
@@ -136,6 +177,10 @@ export function tile(label, value, note, hero = false) {
 export function section(id, heading, prose) {
   return (
     `<section class="fig" id="fig-${esc(id)}"><h2>${esc(heading)}</h2><p>${prose}</p>` +
+    // Empty on a healthy report, and collapsed by CSS when it is. Separate
+    // from the prose above because it is redrawn on every refresh, while
+    // `ensureSection` writes the prose once and never again.
+    `<div class="stale" id="note-${esc(id)}"></div>` +
     `<div class="plot" id="plot-${esc(id)}"></div>` +
     `<div id="table-${esc(id)}"></div></section>`
   );

@@ -160,7 +160,11 @@ th { color: var(--ink); font-weight: 600; }
 }
 .error h2 { color: var(--critical); }
 
-.stale { color: var(--muted); font-size: .85rem; }
+/* A figure whose readings are older than the page it is on. Written on every
+   refresh and empty when there is nothing wrong, so it has to collapse rather
+   than leave a gap under the prose. */
+.stale { color: var(--ink-soft); font-size: .88rem; margin-top: -6px; }
+.stale:empty { display: none; }
 
 @media (max-width: 640px) { .tile.hero .value { font-size: 2.2rem; } }
 

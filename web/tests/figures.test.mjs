@@ -22,7 +22,7 @@ import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
   figureStorageProjects, figureStorageUsers, figureTotalsByProject,
 } from '../src/figures.js';
-import { reconcileTable } from '../src/page.js';
+import { STALE_DAYS, reconcileTable, storageStaleness } from '../src/page.js';
 import { CHROME, SERIES } from '../src/palette.js';
 import * as reports from '../src/reports.js';
 
@@ -354,6 +354,46 @@ describe('the projects a quota figure covers', () => {
 
   it('keeps every project the token administers when no organisation is chosen', () => {
     assert.deepEqual(reports.scopedCodes(administered, null), ['abc1', 'abc2', 'zzz9']);
+  });
+});
+
+describe('the staleness warning on the quota figures', () => {
+  // This endpoint is documented as answering, unchanged and without an error,
+  // after its collector has silently stopped. The heatmap's columns just end,
+  // and the date is otherwise only inside a collapsed table -- so if the page
+  // does not say it in words, nothing does.
+  const readings = (day) => [{ date: day }, { date: '2020-01-01' }];
+  const on = (iso) => new Date(`${iso}T12:00:00Z`);
+
+  it('says nothing while the collector is keeping up', () => {
+    assert.equal(storageStaleness(readings('2026-03-01'), on('2026-03-02')), '');
+  });
+
+  it('stays quiet right up to the threshold and speaks the day after', () => {
+    // A collector between runs must not be accused of being dead.
+    const day = new Date(Date.UTC(2026, 2, 1) + (STALE_DAYS - 1) * 86400000);
+    assert.equal(storageStaleness(readings('2026-03-01'), day), '');
+    const next = new Date(Date.UTC(2026, 2, 1) + STALE_DAYS * 86400000);
+    assert.ok(storageStaleness(readings('2026-03-01'), next).length);
+  });
+
+  it('gives the date it stopped and how long ago that was', () => {
+    const warning = storageStaleness(readings('2026-03-01'), on('2026-06-01'));
+    assert.ok(warning.includes('1 March 2026'));
+    assert.match(warning, /92 days/);
+    assert.ok(warning.includes('<strong>'));
+  });
+
+  it('reads the newest reading, not the first row it is handed', () => {
+    // `storageCurrent` is sorted by how full each quota is, so the freshest
+    // date is in no particular position. Taking the first row would call a
+    // current report months out of date on the strength of one dead quota.
+    const scrambled = [{ date: '2020-01-01' }, { date: '2026-03-01' }, { date: '2019-06-30' }];
+    assert.equal(storageStaleness(scrambled, on('2026-03-02')), '');
+  });
+
+  it('says nothing at all when there are no readings', () => {
+    assert.equal(storageStaleness([], on('2026-06-01')), '');
   });
 });
 

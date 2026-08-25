@@ -826,6 +826,13 @@ def figure_storage_users(monthly: pl.DataFrame) -> go.Figure | None:
     )
 
 
+#: How old the newest quota reading may be before the figures say so in words.
+#: Long enough that a collector between runs is not accused of being dead, short
+#: enough that a page is never quietly a season out of date. The browser
+#: extension carries the same number.
+STALE_DAYS = 45
+
+
 def _storage_staleness(current: pl.DataFrame) -> str:
     """A warning sentence when the readings are old, and nothing when they are not.
 
@@ -839,7 +846,7 @@ def _storage_staleness(current: pl.DataFrame) -> str:
         return ""
     read: date = newest
     days = (date.today() - read).days
-    if days < 45:
+    if days < STALE_DAYS:
         return ""
     return (
         f" <strong>These readings stop on {read:%-d %B %Y}</strong>, {days} days before "

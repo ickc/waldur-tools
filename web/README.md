@@ -135,7 +135,11 @@ That is a limit of the data, not of this port.
 The two quota figures take their project codes from the **allocations** filtered
 by the selected organisation, not from the usage rows the other figures are
 built on. A project that has never run a job has no usage row, and that is
-precisely the project whose disk fills up unnoticed.
+precisely the project whose disk fills up unnoticed. They also carry the same
+staleness warning the command-line report does: this endpoint goes on answering
+after its collector has silently stopped, so a reading older than
+`page.STALE_DAYS` is called out in words above the figure rather than left to be
+found inside the table.
 
 One thing it adds: the **invoice cross-check runs on the page**. `waldur-tools`
 asks you to run `report reconcile` before quoting anything out of the visual

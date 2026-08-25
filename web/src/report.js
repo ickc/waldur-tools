@@ -37,7 +37,7 @@ import {
   figureStorageProjects, figureStorageUsers, figureTotalsByProject, format,
 } from './figures.js';
 import {
-  PROSE, esc, intro, method, reconcileTable, section, tableView, tile,
+  PROSE, esc, intro, method, reconcileTable, section, storageStaleness, tableView, tile,
 } from './page.js';
 import { currentTheme, preferredTheme, setTheme } from './palette.js';
 import { customerFromPermissions } from './portal.js';
@@ -320,7 +320,12 @@ function render() {
   draw('totals', figureTotalsByProject(reports.totalsByProject(perProject)));
   draw('engagement', figureEngagement(totals, existing));
 
+  // The one thing about these two figures that the columns cannot say: the
+  // collector behind them can stop without the endpoint saying so, and then
+  // the heatmap simply ends rather than looking wrong.
+  const stale = storageStaleness(storageNow);
   if (projectQuota !== null) {
+    note('storage-projects', stale);
     draw('storage-projects', projectQuota);
     table('storage-projects', storageNow.filter((row) => row.kind === 'project'), [
       ['project_code', 'Project'],
@@ -333,6 +338,7 @@ function render() {
   }
 
   if (userQuota !== null) {
+    note('storage-users', stale);
     draw('storage-users', userQuota);
     table('storage-users', storageNow.filter((row) => row.kind === 'user'), [
       ['username', 'User'],
@@ -371,6 +377,11 @@ function draw(id, figure) {
 
 function table(id, rows, columns) {
   el(`table-${id}`).innerHTML = tableView(rows, columns);
+}
+
+/** The warning slot under a section's prose. Trusted markup, empty when silent. */
+function note(id, html) {
+  el(`note-${id}`).innerHTML = html;
 }
 
 /**
