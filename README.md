@@ -80,8 +80,8 @@ pixi run waldur-tools viz -o utilisation.html            # the visual report
 
 Common options: `--limit N` (`0` for all rows), `--sort COL --sort COL2`
 with `--desc`, `-o FILE.csv|.json|.parquet`, and `--all` on `allocations`,
-`membership`, `user-usage`, `monthly`, `monthly-totals` and `reconcile` to lift
-the scope filter described below.
+`membership`, `user-usage`, `monthly`, `monthly-totals`, `reconcile`,
+`storage` and `storage-monthly` to lift the scope filter described below.
 
 **Run `reconcile` before you quote anything from `monthly`, `monthly-totals` or
 `viz`.** It puts the node hours those three sum out of
