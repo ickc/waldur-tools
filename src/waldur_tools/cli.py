@@ -334,7 +334,7 @@ def whoami() -> None:
     settings = Settings.from_env()
     console.print(repr(settings))
     with WaldurClient(settings) as client:
-        me = client.http.get(f"{settings.api_url}/api/users/me/").json()
+        me = client.me()
     console.print(
         f"[green]Authenticated as[/] {me.get('username')} ({me.get('full_name') or 'no name'})"
     )

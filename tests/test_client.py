@@ -11,6 +11,7 @@ from waldur_tools.client import WaldurClient, WaldurError, months_until
 
 LIST_URL = f"{API_URL}/api/openportal-associations/"
 USAGE_URL = f"{API_URL}/api/openportal-allocation-user-usage/"
+ME_URL = f"{API_URL}/api/users/me/"
 
 
 def usage_endpoint(months, *, total=None, unfiltered_1900=0):
@@ -81,6 +82,29 @@ def test_error_status_is_wrapped(settings):
     respx.get(LIST_URL).mock(return_value=httpx.Response(403, text="nope"))
     with WaldurClient(settings) as client, pytest.raises(WaldurError, match="403"):
         client.list("openportal-associations")
+
+
+@respx.mock
+def test_me_returns_the_account(settings):
+    respx.get(ME_URL).mock(
+        return_value=httpx.Response(200, json={"username": "alice", "full_name": "Alice Example"})
+    )
+    with WaldurClient(settings) as client:
+        assert client.me()["username"] == "alice"
+
+
+@respx.mock
+def test_me_rejects_a_dead_token(settings):
+    """A rejected token must raise here rather than read as an anonymous user.
+
+    Tokens expire in hours, so this is the routine failure, and the body of the
+    rejection is still perfectly good JSON -- it simply carries a ``detail``
+    where the user should be. Reading ``username`` off it gives ``None``, which
+    is why `whoami` once reported an expired token as a successful login.
+    """
+    respx.get(ME_URL).mock(return_value=httpx.Response(401, json={"detail": "Token has expired."}))
+    with WaldurClient(settings) as client, pytest.raises(WaldurError, match="401"):
+        client.me()
 
 
 @respx.mock

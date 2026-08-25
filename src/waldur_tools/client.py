@@ -106,6 +106,18 @@ class WaldurClient:
         payload: dict[str, str] = self._get(f"{self.settings.api_url}/api/").json()
         return payload
 
+    def me(self) -> JsonDict:
+        """The account the token belongs to.
+
+        Exists so that ``whoami`` reads through :meth:`_get` like every other
+        call here. A rejected token still answers with a JSON body -- a
+        ``detail`` rather than a user -- so reading ``username`` off it yields
+        ``None`` rather than an error, and the status code is the only thing
+        that distinguishes a dead token from a live one.
+        """
+        payload: JsonDict = self._get(f"{self.settings.api_url}/api/users/me/").json()
+        return payload
+
     def count(self, endpoint: str, **filters: Any) -> int | None:
         """Rows an endpoint reports, via the ``X-Result-Count`` header.
 
