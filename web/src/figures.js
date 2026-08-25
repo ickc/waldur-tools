@@ -646,7 +646,7 @@ function storageCells(lookup, order, months, stat, absolute) {
     const values = [];
     const labels = [];
     for (const month of months) {
-      const row = lookup.get(`${key} ${month}`);
+      const row = lookup.get(`${key}\u0000${month}`);
       const raw = row === undefined ? null : row[absolute ? `${stat}_bytes` : `${stat}_fill_pct`];
       if (row === undefined || raw === null) {
         values.push(null);
@@ -719,7 +719,7 @@ function storageHeatmap(rows, { views, heading, leftMargin }) {
     const lookup = new Map();
     for (const row of rows) {
       if (row.filesystem !== filesystem) continue;
-      lookup.set(`${row.row_key} ${row.month}`, row);
+      lookup.set(`${row.row_key}\u0000${row.month}`, row);
     }
     return storageCells(lookup, order, months, stat, absolute);
   });
