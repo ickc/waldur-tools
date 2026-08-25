@@ -168,11 +168,16 @@ function render() {
   const unallocatedMonths = unallocated / monthlyShare;
   const queue = reports.queueMonthly(usageReports, codes);
 
-  // Scoped to the same project codes as everything else: the storage endpoint
-  // reports every project on the machine, not only the ones this token
-  // administers, and an unscoped figure would put other organisations' disks
-  // on our page.
-  const storageSamples = reports.storageSamples(storageReports, codes);
+  // Scoped off the allocations rather than off the usage, and narrowed to the
+  // selected organisation. The storage endpoint reports every project on the
+  // machine, so an unscoped figure would put other organisations' disks on our
+  // page; taking the codes from `perProject` instead would drop any project
+  // that has never run a job, and a project with no compute is exactly the one
+  // whose disk fills up unnoticed.
+  const storageSamples = reports.storageSamples(
+    storageReports,
+    reports.scopedCodes(scope, customer),
+  );
   const storageByMonth = reports.storageMonthly(storageSamples);
   const storageNow = reports.storageCurrent(storageSamples);
   const projectQuota = figureStorageProjects(storageByMonth);

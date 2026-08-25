@@ -223,6 +223,23 @@ export function inScope(allocations) {
   return [...projects.values()];
 }
 
+/**
+ * The project codes one organisation holds, out of everything the token sees.
+ *
+ * Taken from the allocations rather than from the usage, which is the whole
+ * point: a project that has never run a job has no usage row, and a project
+ * with no compute is exactly the one whose disk fills up with nobody watching.
+ * `null` means every project the token administers, across organisations.
+ *
+ * The Python side does this inside `reports.storage_samples(customer=...)`;
+ * here the caller passes codes in, so the filter lives at the call site.
+ */
+export function scopedCodes(scope, customer = null) {
+  return scope
+    .filter((project) => customer === null || project.customer_name === customer)
+    .map((project) => project.project_code);
+}
+
 /** The customers visible in the allocations, with how many projects each has. */
 export function customersInScope(allocations) {
   const counts = new Map();

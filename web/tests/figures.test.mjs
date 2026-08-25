@@ -333,6 +333,30 @@ describe('sizes written back out', () => {
   });
 });
 
+describe('the projects a quota figure covers', () => {
+  const administered = [
+    { project_code: 'abc1', customer_name: 'UKRI' },
+    { project_code: 'abc2', customer_name: 'UKRI' },
+    { project_code: 'zzz9', customer_name: 'Other Uni' },
+  ];
+
+  it('keeps a project that has never run a job', () => {
+    // The bug this replaced took the codes off the monthly usage, so a project
+    // with no compute vanished from the disk figures -- and a project with no
+    // compute is exactly the one whose disk fills up with nobody watching.
+    // Nothing here has a usage row at all.
+    assert.deepEqual(reports.scopedCodes(administered, 'UKRI'), ['abc1', 'abc2']);
+  });
+
+  it('drops the organisations the report is not about', () => {
+    assert.ok(!reports.scopedCodes(administered, 'UKRI').includes('zzz9'));
+  });
+
+  it('keeps every project the token administers when no organisation is chosen', () => {
+    assert.deepEqual(reports.scopedCodes(administered, null), ['abc1', 'abc2', 'zzz9']);
+  });
+});
+
 describe('the invoice cross-check table', () => {
   // Two routes to one number. What the table has to preserve is that the
   // reader can tell a known accounting quirk from an unstable pull, and

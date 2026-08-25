@@ -121,7 +121,7 @@ Eight figures, against the ten `waldur-tools viz` produces.
 | Total per project | ✅ | |
 | Engagement | ✅ | |
 | Demand: jobs and queue wait | ✅ | from `openportal-project-usage-reports` |
-| Project quota heatmap | ✅ | from `openportal-project-storage-reports` |
+| Project quota heatmap | ✅ | from `openportal-project-storage-reports`, scoped off the allocations |
 | Personal quota heatmap | ✅ | the same endpoint, `home` and `scratch` |
 | Job-size distribution | ❌ | needs `sacct` |
 | Queue wait by what was requested | ❌ | needs `sacct` |
@@ -131,6 +131,11 @@ The three missing ones read a SLURM capture. The portal has **no per-job view** 
 its usage reports stop at daily totals — so what a job asked the scheduler for
 exists only on the cluster, and a browser on a laptop cannot get to a login node.
 That is a limit of the data, not of this port.
+
+The two quota figures take their project codes from the **allocations** filtered
+by the selected organisation, not from the usage rows the other figures are
+built on. A project that has never run a job has no usage row, and that is
+precisely the project whose disk fills up unnoticed.
 
 One thing it adds: the **invoice cross-check runs on the page**. `waldur-tools`
 asks you to run `report reconcile` before quoting anything out of the visual
