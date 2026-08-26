@@ -317,7 +317,8 @@ def test_the_fixture_exercises_what_it_claims_to(snapshot):
     scratch = next(
         row
         for row in monthly_storage
-        if row["month"] == "2025-01" and row["username"] == "alice"
+        if row["month"] == "2025-01"
+        and row["username"] == "alice"
         and row["filesystem"] == "scratch"
     )
     assert scratch["limit_bytes"] is None

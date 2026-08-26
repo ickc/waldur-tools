@@ -531,7 +531,7 @@ def test_quota_titles_are_kept_clear_of_the_view_buttons(snapshot):
 
 
 def test_a_cell_only_says_of_when_one_quota_held_all_month(snapshot):
-    """"X of Y" is arithmetic, and it is not written where it does not hold.
+    """ "X of Y" is arithmetic, and it is not written where it does not hold.
 
     Alice's scratch quota is raised mid-January, so the month's percentage and
     its size are taken against different limits and the sentence relating them
