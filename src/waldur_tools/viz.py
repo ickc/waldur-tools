@@ -782,8 +782,27 @@ def _storage_heatmap(
         _layout(
             height=170 + 26 * len(order),
             hovermode="closest",
-            margin={"l": left_margin, "r": 30, "t": 60, "b": 60},
-            title={"text": title, "font": {"size": 16, "color": light("ink")}},
+            # These are the only figures here that carry a title of their own,
+            # and they carry six buttons with it, so they need the geometry the
+            # extension arrived at the hard way: `t` deep enough for two bands,
+            # and the title pinned to the top-left in *container* coordinates
+            # rather than centred in paper ones. Centred is the default, and it
+            # puts a long title on a collision course with a right-anchored
+            # button row -- the two grow towards each other, and the narrower
+            # the window the sooner they meet. Left-aligned in its own band, a
+            # title runs out of figure rather than into the buttons.
+            margin={"l": left_margin, "r": 30, "t": 104, "b": 60},
+            title={
+                "text": title,
+                "font": {"size": 16, "color": light("ink")},
+                "x": 0,
+                "xanchor": "left",
+                "xref": "container",
+                "y": 1,
+                "yanchor": "top",
+                "yref": "container",
+                "pad": {"l": 8, "t": 10},
+            },
             yaxis={
                 "linecolor": light("axis"),
                 "tickfont": {"color": light("muted")},

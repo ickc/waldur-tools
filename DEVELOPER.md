@@ -1104,6 +1104,12 @@ and no amount of checking a spec object catches a title that renders as
 margin deep enough for two bands, and there is a test for that — but the test
 was written after the browser found it, which is the point.
 
+The command-line report inherited the fault rather than the fix, because it
+carries titles in only one place: `viz.py` puts section headings in the HTML
+around each figure, and the two quota heatmaps are the only figures there with
+a title *inside* the plot — and six buttons beside it. They now use the same
+geometry, and `tests/test_viz.py` pins it the same way.
+
 ## Releasing the extension
 
 The extension ships as a zip on a GitHub release, built by

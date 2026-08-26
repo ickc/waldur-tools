@@ -509,6 +509,27 @@ def test_every_quota_cell_names_its_size_and_its_evidence(snapshot):
     assert all(any(unit in text for unit in ("KB", "MB", "GB", "TB")) for text in hovers)
 
 
+def test_quota_titles_are_kept_clear_of_the_view_buttons(snapshot):
+    """The one geometry a spec test can pin, because the browser found it first.
+
+    Three things want the strip above the plot: plotly's modebar, the button
+    row and the title. A centred title and a right-anchored row of six buttons
+    grow towards each other, and the narrower the window the sooner they touch.
+    The extension hit exactly that and answered it with a title pinned left in
+    container coordinates over a top margin deep enough for two bands; these
+    are the only figures on this side carrying a title of their own, so they
+    are the only ones that needed the same answer.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    for figure in (viz.figure_storage_projects(monthly), viz.figure_storage_users(monthly)):
+        assert figure.layout.title.xanchor == "left"
+        assert figure.layout.title.xref == "container"
+        # The button row sits at y=1.03 in paper coordinates and is about 30px
+        # tall; the title needs a band of its own above that.
+        assert figure.layout.margin.t >= 96
+        assert figure.layout.updatemenus[0].buttons
+
+
 def test_a_cell_only_says_of_when_one_quota_held_all_month(snapshot):
     """"X of Y" is arithmetic, and it is not written where it does not hold.
 
