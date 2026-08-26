@@ -283,7 +283,7 @@
                   "usage": "10.00 GB"
                 },
                 "scratch": {
-                  "limit": "5.00 TB",
+                  "limit": "4.00 TB",
                   "usage": "500.00 GB"
                 }
               },
@@ -376,7 +376,7 @@
                   "usage": "11.00 GB"
                 },
                 "scratch": {
-                  "limit": "5.00 TB",
+                  "limit": "4.00 TB",
                   "usage": "510.00 GB"
                 }
               },

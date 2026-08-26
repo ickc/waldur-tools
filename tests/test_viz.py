@@ -509,6 +509,37 @@ def test_every_quota_cell_names_its_size_and_its_evidence(snapshot):
     assert all(any(unit in text for unit in ("KB", "MB", "GB", "TB")) for text in hovers)
 
 
+def test_a_cell_only_says_of_when_one_quota_held_all_month(snapshot):
+    """"X of Y" is arithmetic, and it is not written where it does not hold.
+
+    Alice's scratch quota is raised mid-January, so the month's percentage and
+    its size are taken against different limits and the sentence relating them
+    would be false. Both figures survive; only the relation comes off.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_users(monthly)
+    labels = [label for label in figure.data[0].y if label.startswith("alice")]
+    assert labels
+    row = list(figure.data[0].y).index(labels[0])
+    scratch = next(
+        button
+        for button in figure.layout.updatemenus[0].buttons
+        if button.label == "Scratch median"
+    )
+    hover = next(text for text in scratch.args[0]["text"][0][row] if text != "no reading")
+    assert "% full" in hover
+    assert "quota not the same on every reading" in hover
+    # "3 of 31 days read" is the evidence clause and belongs there; what must
+    # not appear is a size written as a fraction of a quota.
+    assert " of " not in hover.split(" · ")[0]
+    # The month where the quota did hold still says what it was.
+    home = next(
+        button for button in figure.layout.updatemenus[0].buttons if button.label == "Home median"
+    )
+    steady = [text for text in home.args[0]["text"][0][row] if text != "no reading"]
+    assert steady and all(" of 100.00 GB" in text for text in steady)
+
+
 def test_quota_figures_are_absent_rather_than_empty(tmp_path, allocations):
     """A snapshot that never pulled storage loses two figures, not the report."""
     snap = Snapshot.create(tmp_path, "bare")

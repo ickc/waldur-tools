@@ -325,6 +325,29 @@ describe('the quota heatmaps', () => {
     assert.ok(hovers.every((text) => text.includes('days')));
   });
 
+  it('only says "of" when one quota held all month', () => {
+    // "X of Y" is arithmetic, and it is not written where it does not hold.
+    // Alice's scratch quota is raised mid-January, so the month's percentage
+    // and its size are taken against different limits and the sentence
+    // relating them would be false. Both figures survive; the relation comes
+    // off. Her home quota does hold all month, and still says what it was.
+    const figure = figureStorageUsers(storageByMonth);
+    const row = figure.data[0].y.findIndex((label) => label.startsWith('alice'));
+    assert.ok(row >= 0);
+    const hoversFor = (label) => {
+      const button = figure.layout.updatemenus[0].buttons.find((b) => b.label === label);
+      return button.args[0].text[0][row].filter((text) => text !== 'no reading');
+    };
+    const [scratch] = hoversFor('Scratch median');
+    assert.match(scratch, /% full/);
+    assert.match(scratch, /quota not the same on every reading/);
+    // "3 of 31 days read" is the evidence clause and belongs there; what must
+    // not appear is a size written as a fraction of a quota.
+    assert.ok(!scratch.split(' · ')[0].includes(' of '));
+    const home = hoversFor('Home median');
+    assert.ok(home.length && home.every((text) => text.includes(' of 100.00 GB')));
+  });
+
   it('leaves a quota with no reading blank, not at zero', () => {
     // One fixture user holds a home quota and no scratch one, so the blank
     // appears when the buttons switch filesystem rather than on the default

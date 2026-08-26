@@ -1171,6 +1171,18 @@ def storage_monthly(source: Snapshot | WaldurClient, *, scope: bool = True) -> p
     which is the part that actually breaks jobs; the median covers the same
     "ignore one bad day" ground without that.
 
+    ``limit_bytes`` is the quota **every** reading in the month agreed on, and
+    ``null`` when they did not -- a quota raised mid-month, or one reading whose
+    limit was not a size. That is stricter than the last limit read, and it is
+    what keeps the three statistics honest. Each is chosen independently: the
+    peak fill and the peak size can be different readings, and the medians are
+    interpolated between two. While one limit holds all month that costs
+    nothing, because ``fill_pct`` is then a fixed multiple of ``usage_bytes``
+    and both the maximum and the median carry straight through it -- so
+    ``peak_fill_pct`` really is ``peak_bytes`` over that limit. The moment the
+    limit moves, that stops being true, and nothing downstream may write the
+    three as one reading. A ``null`` here is how they are told not to.
+
     ``is_partial`` means *fewer daily readings than the month has days*, which
     is a different claim from the ``is_partial`` of :func:`monthly_totals` --
     there it marks the month the snapshot was taken in. Storage readings lag
@@ -1218,7 +1230,12 @@ def storage_by_month(samples: pl.DataFrame) -> pl.DataFrame:
             peak_bytes=pl.col("usage_bytes").max(),
             end_bytes=pl.col("usage_bytes").last(),
             median_bytes=pl.col("usage_bytes").median(),
-            limit_bytes=pl.col("limit_bytes").last(),
+            # The limit the month *held*, not the last one read. See the
+            # docstring: it is what makes the three statistics above safe to
+            # write beside it as a fraction of one quota.
+            limit_bytes=pl.when(pl.col("limit_bytes").n_unique() == 1)
+            .then(pl.col("limit_bytes").first())
+            .otherwise(pl.lit(None, dtype=pl.Float64)),
             days_observed=pl.col("date").n_unique().cast(pl.Int64),
             samples=pl.len().cast(pl.Int64),
         )

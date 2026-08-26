@@ -590,6 +590,14 @@ def _storage_hover(row: dict[str, Any], stat: str) -> str:
     That is what lets the quota figures spend their buttons on the axes that
     change the picture -- the statistic, and for people the filesystem --
     instead of on an absolute view that would say the same thing in a colour.
+
+    "``X`` of ``Y``" is arithmetic, and it is only written where the arithmetic
+    holds. The percentage and the size are chosen independently -- see
+    :func:`waldur_tools.reports.storage_monthly` -- and they describe one
+    reading only while a single quota held all month, which is exactly when
+    ``limit_bytes`` is not null. Where the quota moved, or one reading did not
+    report a size for it, both figures are still true of the month and the
+    sentence that relates them is not, so it is left off.
     """
     fill = row[f"{stat}_fill_pct"]
     used = reports.humanise_bytes(row[f"{stat}_bytes"])
@@ -600,6 +608,8 @@ def _storage_hover(row: dict[str, Any], stat: str) -> str:
     # rather than page markup, and it would show the entity verbatim.
     if fill is None:
         return f"{used}, no limit reported · {coverage}"
+    if row["limit_bytes"] is None:
+        return f"{fill:,.1f}% full — {used}, quota not the same on every reading · {coverage}"
     limit = reports.humanise_bytes(row["limit_bytes"])
     return f"{fill:,.1f}% full — {used} of {limit} · {coverage}"
 

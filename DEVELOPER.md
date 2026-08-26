@@ -602,9 +602,22 @@ a figure and a table describing different pulls.
 | `peak_*` | the maximum over every sample in the month — the reading that decides whether writes failed |
 | `end_*` | the last sample by `generated_at` — the level carried into the next month |
 | `median_*` | the median over every sample, robust to one day's spike |
+| `limit_bytes` | the quota **every** sample in the month agreed on; **null** when they did not |
 | `days_observed` | distinct dates with a reading, which is **not** the sample count |
 | `samples` | readings behind the row, normally two per day |
 | `is_partial` | `days_observed < days in the calendar month` |
+
+`limit_bytes` is stricter than "the last limit read", and that is what lets the
+tooltip write a cell as "*X* of *Y*". The three statistics are each chosen
+independently — the peak fill and the peak size can be different readings, and
+the medians are interpolated between two — so they describe one reading only
+while a single quota holds all month. While it does, that costs nothing:
+`fill_pct` is then a fixed multiple of `usage_bytes`, and both the maximum and
+the median carry straight through it, so `peak_fill_pct` really is `peak_bytes`
+over that limit. The moment the quota moves, a peak of 90% and a peak size of
+1.5 TB can sit beside a limit of 2 TB and none of the arithmetic works. A null
+is how the figures are told to state the two figures and leave the relation
+between them out.
 
 **`is_partial` means something different here** from the column of the same name
 on `monthly-totals`, where it marks the month the snapshot was taken in. Storage
@@ -1073,7 +1086,8 @@ blanked association row — a golden file over trivial data proves nothing. On t
 storage side it asserts the same of that endpoint's awkward parts: a finished
 month whose last day exists only in the top-level snapshot, a month in progress
 with no `daily_reports` at all, one day reported twice by two collectors, a
-limit that is not a size, and a reading dated outside the month its row claims.
+limit that is not a size, a quota raised part-way through a month, and a reading
+dated outside the month its row claims.
 
 The same warning as above applies with more force: none of this opens a browser.
 The parity test covers the arithmetic and nothing else, so a change to the

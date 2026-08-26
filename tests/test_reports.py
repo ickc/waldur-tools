@@ -588,6 +588,31 @@ def test_the_end_of_a_month_is_the_last_sample_and_not_the_last_readable_one(
     assert row["peak_bytes"] == pytest.approx(95 * 1024**3)
 
 
+def test_a_quota_raised_mid_month_leaves_the_month_without_one(storage_snapshot):
+    """Three statistics of one month are not three parts of one reading.
+
+    The peak fill, the peak size and the median are each chosen on their own,
+    and while a single quota holds all month that costs nothing: `fill_pct` is
+    then a fixed multiple of `usage_bytes`, so the maximum and the median carry
+    straight through it and the three agree by construction. Alice's scratch
+    quota is raised between the 29th and the 30th, and they stop agreeing --
+    the median fill is taken over one set of limits and the median size over
+    another. `limit_bytes` goes null rather than picking one of them, which is
+    how the hover is told not to write the three as "X of Y".
+    """
+    monthly = reports.storage_monthly(storage_snapshot)
+    row = monthly.filter(
+        (pl.col("month") == date(2025, 1, 1))
+        & (pl.col("username") == "alice")
+        & (pl.col("filesystem") == "scratch")
+    ).row(0, named=True)
+    assert row["limit_bytes"] is None
+    # And not merely unreported: dividing the median size by either limit the
+    # month held misses the median fill, which is the lie being prevented.
+    for limit in (4 * 1024**4, 5 * 1024**4):
+        assert row["median_fill_pct"] != pytest.approx(100 * row["median_bytes"] / limit)
+
+
 def test_a_limit_that_is_not_a_size_blanks_the_percentage(storage_snapshot):
     """Null, not zero and not a division by it: the quota is simply unknown."""
     current = reports.storage(storage_snapshot)

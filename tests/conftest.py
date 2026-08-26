@@ -356,8 +356,14 @@ def usage_reports():
     ]
 
 
-def _quotas(project, alice_home, alice_scratch, bob_home, stamp):
-    """One reading: the project's own quota plus two people's, at one instant."""
+def _quotas(project, alice_home, alice_scratch, bob_home, stamp, scratch_limit="5.00 TB"):
+    """One reading: the project's own quota plus two people's, at one instant.
+
+    ``scratch_limit`` is a parameter because a quota is not a constant: alice's
+    scratch is raised part-way through January, which is the one thing that can
+    make a month's peak, median and limit describe three different states of
+    the world.
+    """
     return {
         "generated_at": stamp,
         "project": "abc1.brics",
@@ -365,7 +371,7 @@ def _quotas(project, alice_home, alice_scratch, bob_home, stamp):
         "user_quotas": {
             "alice.abc1.brics": {
                 "home": {"limit": "100.00 GB", "usage": alice_home},
-                "scratch": {"limit": "5.00 TB", "usage": alice_scratch},
+                "scratch": {"limit": scratch_limit, "usage": alice_scratch},
             },
             "bob.abc1.brics": {"home": {"limit": "100.00 GB", "usage": bob_home}},
         },
@@ -395,6 +401,9 @@ def storage_reports():
     - A quota whose *newest* reading is unreadable while older ones parsed, so
       the end-of-month statistic has to answer "unknown" rather than repeat the
       last figure it could read.
+    - A quota **raised part-way through the month**, so the peak fill, the peak
+      size and the limit belong to three different states of the world and may
+      not be written as one reading.
     """
     # The last January reading of bob's home came back with neither figure in a
     # shape the parser recognises. The 29th and the 30th are readable, so this
@@ -433,6 +442,7 @@ def storage_reports():
                         "500.00 GB",
                         "80.00 GB",
                         "2025-01-29T10:00:00.000000000Z",
+                        scratch_limit="4.00 TB",
                     ),
                     "2025-01-30": _quotas(
                         "2.00 TB",
@@ -459,6 +469,7 @@ def storage_reports():
                         "510.00 GB",
                         "81.00 GB",
                         "2025-01-29T10:15:00.000000000Z",
+                        scratch_limit="4.00 TB",
                     ),
                     "2025-01-30": _quotas(
                         "2.10 TB",

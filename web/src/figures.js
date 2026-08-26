@@ -634,6 +634,14 @@ function storageHover(row, stat) {
   const seen = row.days_observed;
   const coverage = seen >= days ? `all ${days} days` : `${seen} of ${days} days read`;
   if (fill === null) return `${used}, no limit reported · ${coverage}`;
+  // "X of Y" is arithmetic, and only written where it holds. The percentage and
+  // the size are chosen independently by `storageMonthly`, and describe one
+  // reading only while a single quota held all month -- which is exactly when
+  // `limit_bytes` is not null. Both figures stay true of the month either way;
+  // the sentence relating them does not, so it comes off.
+  if (row.limit_bytes === null) {
+    return `${fill.toFixed(1)}% full — ${used}, quota not the same on every reading · ${coverage}`;
+  }
   const limit = humaniseBytes(row.limit_bytes);
   return `${fill.toFixed(1)}% full — ${used} of ${limit} · ${coverage}`;
 }

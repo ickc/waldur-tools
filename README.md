@@ -174,6 +174,12 @@ which is the reading that decides whether writes actually failed. A mean is
 deliberately not offered: averaging a slowly drifting level is close to
 meaningless, and it hides the peak.
 
+Each of the three is picked on its own, so a tooltip reads "*X* of *Y*" only
+where one quota held for the whole month. Where it was raised mid-month the
+percentage and the size are still both true of the month, but they are measured
+against different limits, so the sentence relating them is left off rather than
+written with a limit that only half of it divides by.
+
 **Colour is a percentage, not a size.** Quotas are uniform by default but not by
 rule — a project or a person can be granted more — so a byte count means a
 different thing on every row of the grid, while 100% means the same thing on all

@@ -310,6 +310,19 @@ def test_the_fixture_exercises_what_it_claims_to(snapshot):
     assert bob["end_bytes"] is None
     assert bob["peak_bytes"] is not None
 
+    # A quota raised mid-month leaves the month without one: the fill statistics
+    # and the size statistics are then taken against different limits, and
+    # `limit_bytes` goes null rather than picking one and implying the rest
+    # divide by it.
+    scratch = next(
+        row
+        for row in monthly_storage
+        if row["month"] == "2025-01" and row["username"] == "alice"
+        and row["filesystem"] == "scratch"
+    )
+    assert scratch["limit_bytes"] is None
+    assert scratch["median_fill_pct"] is not None
+
     # A limit that is not a size blanks the percentage rather than dividing.
     unlimited = [row for row in monthly_storage if row["project_code"] == "abc2"]
     assert unlimited and all(row["peak_fill_pct"] is None for row in unlimited)

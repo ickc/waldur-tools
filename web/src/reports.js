@@ -934,6 +934,17 @@ export function storageCurrent(samples) {
  * meaningless -- it is the mean of a random walk -- and it hides the peak,
  * which is the part that actually breaks jobs.
  *
+ * `limit_bytes` is the quota **every** reading in the month agreed on, and null
+ * when they did not -- a quota raised mid-month, or one reading whose limit was
+ * not a size. Stricter than the last limit read, and it is what keeps the three
+ * statistics honest. Each is chosen independently: the peak fill and the peak
+ * size can be different readings, and the medians are interpolated between two.
+ * While one limit holds all month that costs nothing, because `fill_pct` is
+ * then a fixed multiple of `usage_bytes` and both the maximum and the median
+ * carry straight through it. The moment the limit moves, that stops being true,
+ * and nothing downstream may write the three as one reading; a null here is how
+ * they are told not to.
+ *
  * `is_partial` means *fewer daily readings than the month has days*, which is a
  * different claim from the `is_partial` of `monthlyTotals`: there it marks the
  * month the pull happened in. Storage readings lag their own collector, so
@@ -953,6 +964,7 @@ export function storageMonthly(samples) {
         filesystem: row.filesystem,
         fills: [],
         usages: [],
+        limits: new Set(),
         days: new Set(),
         last: null,
         samples: 0,
@@ -965,6 +977,7 @@ export function storageMonthly(samples) {
     // `last()` on the other side of the parity tests keeps the null.
     if (row.fill_pct !== null) bucket.fills.push(row.fill_pct);
     if (row.usage_bytes !== null) bucket.usages.push(row.usage_bytes);
+    bucket.limits.add(row.limit_bytes);
     bucket.days.add(row.date);
     bucket.last = row;
     bucket.samples += 1;
@@ -983,7 +996,10 @@ export function storageMonthly(samples) {
       peak_bytes: bucket.usages.length ? Math.max(...bucket.usages) : null,
       end_bytes: bucket.last.usage_bytes,
       median_bytes: median(bucket.usages),
-      limit_bytes: bucket.last.limit_bytes,
+      // The limit the month held, not the last one read: null unless every
+      // reading agreed on one. See `storageMonthly`'s doc comment -- it is what
+      // makes the statistics above safe to write as a fraction of one quota.
+      limit_bytes: bucket.limits.size === 1 ? [...bucket.limits][0] : null,
       days_observed: bucket.days.size,
       samples: bucket.samples,
       is_partial: bucket.days.size < daysInMonth(bucket.month),
