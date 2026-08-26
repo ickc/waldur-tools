@@ -104,6 +104,25 @@ class WaldurError(RuntimeError):
         self.transient = transient
 
 
+def _missing_count_header(endpoint: str) -> WaldurError:
+    """Said when ``X-Result-Count`` is absent, because silence is the worst answer.
+
+    Every guard on a by-month pull is arithmetic against that header, so a pull
+    that cannot read it has no guards at all -- and the shape of that failure is
+    the worst one available: :meth:`WaldurClient.count` answers ``None``, a
+    caller that reads ``None`` as a zero takes the month for an empty one, and
+    the snapshot is written holding no rows and no error. Nothing downstream can
+    tell that table from a quiet month. So it is checked for, and said out loud.
+
+    Not ``transient``: a header that is not being sent will not be sent on the
+    next run either, and the fix is at the deployment rather than here.
+    """
+    return WaldurError(
+        f"{endpoint} returned no readable X-Result-Count header, so none of the paging "
+        "guards can run and no total built from it can be trusted."
+    )
+
+
 class WaldurClient:
     """Authenticated access to a Waldur deployment."""
 
@@ -169,10 +188,21 @@ class WaldurClient:
 
         ``filters`` are passed through, so this also counts a slice -- which is
         what :meth:`iter_list_by_month` checks each month's pull against.
+
+        ``None`` when the header is absent, and every caller that guards a pull
+        with it has to say so rather than read it as a zero -- see
+        :func:`_missing_count_header`.
         """
         response = self._get(self._url(endpoint), params={"page_size": 1, **filters})
         header = response.headers.get("x-result-count")
         return int(header) if header is not None else None
+
+    def _count_or_fail(self, endpoint: str, **filters: Any) -> int:
+        """:meth:`count`, for the callers that cannot proceed without one."""
+        total = self.count(endpoint, **filters)
+        if total is None:
+            raise _missing_count_header(endpoint)
+        return total
 
     def iter_list(
         self,
@@ -265,12 +295,15 @@ class WaldurClient:
 
         Every one of those faults is a race, and a race is retried ``attempts``
         times before it is reported.
+
+        None of it runs without ``X-Result-Count``, so an endpoint that does not
+        send one ends the pull rather than being read as an empty table.
         """
-        total = self.count(endpoint)
+        total = self._count_or_fail(endpoint)
 
         # 1900 predates every Waldur deployment: a non-zero answer means the
         # filter was dropped and we are looking at the unfiltered table.
-        if self.count(endpoint, year=1900, month=1):
+        if self._count_or_fail(endpoint, year=1900, month=1):
             raise WaldurError(
                 f"{endpoint} ignores the year/month filter, so it cannot be pulled "
                 "a month at a time. Remove it from cache.BY_MONTH."
@@ -295,8 +328,8 @@ class WaldurClient:
         # than the table claimed is damage, more is the table having grown
         # between that count and the last page -- and every month is already
         # verified row by row, so a fresh count that agrees is all that is left.
-        if total is not None and seen != total:
-            now = self.count(endpoint) if seen > total else None
+        if seen != total:
+            now = self._count_or_fail(endpoint) if seen > total else None
             if now != seen:
                 moved = "" if now is None else f", and {now} in it now"
                 raise WaldurError(
@@ -339,7 +372,9 @@ class WaldurClient:
     ) -> tuple[list[JsonDict], WaldurError | None]:
         """One attempt: the rows, and the reason they cannot be trusted."""
         name = f"{endpoint} {year}-{month:02d}"
-        expected = self.count(endpoint, year=year, month=month)
+        # Raised rather than returned as a failure: an absent header is not a
+        # race, and re-pulling the month cannot make one appear.
+        expected = self._count_or_fail(endpoint, year=year, month=month)
         if not expected:
             return [], None
         rows = list(self.iter_list(endpoint, page_size=page_size, year=year, month=month))
@@ -367,7 +402,7 @@ class WaldurClient:
                 f"{name}: fetched {len(rows)} rows but the server reported {expected}, and "
                 "no row keys were given to tell a new row from a repeated one."
             )
-        now = self.count(endpoint, year=year, month=month)
+        now = self._count_or_fail(endpoint, year=year, month=month)
         if now == len(rows):
             return rows, None
         return rows, WaldurError(

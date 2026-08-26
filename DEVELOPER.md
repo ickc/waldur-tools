@@ -865,8 +865,14 @@ consistently: month-at-a-time pulls come back duplicate-free and match the
 portal's own dashboard to within rounding. `cache.fetch()` is the single place
 that chooses, so `snapshot` and `report --live` cannot drift apart.
 
-Three guards, because every failure here is silent:
+Four guards, because every failure here is silent:
 
+- **The count might not be there at all.** Every guard below is arithmetic
+  against `X-Result-Count`, so a response without one has no guards — and the
+  shape of that failure is the worst available: `count()` answers `None`, a
+  caller that reads `None` as a zero takes the month for an empty one, and a
+  snapshot of no rows is written with no error anywhere. So an unreadable count
+  is an error in its own right, in `client.py` as in the extension.
 - **The filter might be ignored.** Waldur's DRF filters drop parameters they do
   not recognise (see the warning above), so an endpoint without `year`/`month`
   would be fetched once per month and yield the whole table over and over.

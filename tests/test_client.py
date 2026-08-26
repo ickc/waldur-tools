@@ -326,3 +326,46 @@ def test_by_month_refuses_an_over_long_month_without_keys_to_judge_it(settings):
                 "openportal-allocation-user-usage", today=date(2026, 1, 5), attempts=1
             )
         )
+
+
+@respx.mock
+def test_by_month_rejects_an_endpoint_that_sends_no_count_header(settings):
+    """No count is not a count of nothing.
+
+    Every guard on this walk is arithmetic against ``X-Result-Count``, so a
+    header that goes missing takes all of them with it -- and it does so in the
+    quietest way there is: each month reads as empty, the walk succeeds, and a
+    snapshot of no rows is written with nothing anywhere saying why.
+    """
+
+    def handler(request):
+        return httpx.Response(200, json=[])
+
+    respx.get(USAGE_URL).mock(side_effect=handler)
+    with (
+        WaldurClient(settings) as client,
+        pytest.raises(WaldurError, match="no readable X-Result-Count header"),
+    ):
+        list(client.iter_list_by_month("openportal-allocation-user-usage", today=date(2026, 1, 5)))
+
+
+@respx.mock
+def test_by_month_rejects_a_month_whose_count_header_goes_missing(settings):
+    """The header can also disappear part-way through, one month at a time."""
+
+    def handler(request):
+        params = request.url.params
+        if "year" not in params:
+            return httpx.Response(200, json=[], headers={"X-Result-Count": "1"})
+        if params["year"] == "1900":
+            return httpx.Response(200, json=[], headers={"X-Result-Count": "0"})
+        if (int(params["year"]), int(params["month"])) == (2026, 1):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[], headers={"X-Result-Count": "0"})
+
+    respx.get(USAGE_URL).mock(side_effect=handler)
+    with (
+        WaldurClient(settings) as client,
+        pytest.raises(WaldurError, match="no readable X-Result-Count header"),
+    ):
+        list(client.iter_list_by_month("openportal-allocation-user-usage", today=date(2026, 1, 5)))

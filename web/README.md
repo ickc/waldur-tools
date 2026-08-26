@@ -236,11 +236,12 @@ hours well past the true figure and read as a finding until it was checked.
   omissions cancel out in a count;
 - the months summing to the unfiltered total for the table as a whole;
 - and `X-Result-Count` being *readable at all*. Every guard above is arithmetic
-  against that header, and it crosses an origin only while the deployment names
-  it in `access-control-expose-headers`. Were it to stop doing so, `count()`
-  would answer null, null would read as an empty month, and the report would
-  draw itself out of no rows without an error anywhere. So a missing header is
-  an error in its own right.
+  against that header, so a missing one is an error in its own right on both
+  sides. It is the browser that can really lose it: the header crosses an origin
+  only while the deployment names it in `access-control-expose-headers`, and were
+  it to stop doing so, `count()` would answer null, null would read as an empty
+  month, and the report would draw itself out of no rows without an error
+  anywhere.
 
 The count check has one exception, and it is the live month. `X-Result-Count` is
 taken with the first page while later pages resolve their `OFFSET` against the
