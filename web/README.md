@@ -242,6 +242,15 @@ hours well past the true figure and read as a finding until it was checked.
   draw itself out of no rows without an error anywhere. So a missing header is
   an error in its own right.
 
+The count check has one exception, and it is the live month. `X-Result-Count` is
+taken with the first page while later pages resolve their `OFFSET` against the
+table as it is by then, so a usage row landing mid-crawl leaves the pull holding
+*more* rows than the count promised — the portal working, not failing. A pull
+that is over-long, repeats no key, and matches a fresh count is kept; a repeat
+or a short pull still fails outright. Every one of those is a race, so a month
+is re-pulled `MONTH_ATTEMPTS` times before it is reported, and `onRetry` says so
+in the progress line. See DEVELOPER.md for the full ruling.
+
 The last of those doubles as the cache's staleness check: if the portal backfills
 an old month, the totals stop agreeing, the cache is dropped and the pull runs
 again. Staleness is caught by arithmetic rather than by an expiry someone guessed.

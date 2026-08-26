@@ -486,6 +486,16 @@ async function run({ refresh = false } = {}) {
       progress(`Reading monthly usage — ${done} of ${of} months, ${format(rows, 0)} rows`,
         done, of);
     },
+    // A month is re-pulled when it comes back inconsistent, which is nearly
+    // always the live month growing under the read. Said out loud because it is
+    // the only reason a pull stalls on one month, and silence there reads as a
+    // hang; the console line is what a bug report needs.
+    onRetry: ({ year, month, attempt, of, detail }) => {
+      console.warn(`Retrying ${year}-${String(month).padStart(2, '0')} (${attempt}/${of}):`,
+        detail);
+      progress(`Re-reading ${reports.monthKey(year, month)} — the portal changed it mid-read `
+        + `(attempt ${attempt} of ${of})`);
+    },
   });
 
   state.loading = false;

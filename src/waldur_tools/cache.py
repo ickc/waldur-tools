@@ -175,7 +175,12 @@ def fetch(client: WaldurClient, endpoint: str) -> pl.DataFrame:
     inflated monthly totals the snapshot no longer has.
     """
     records = (
-        client.iter_list_by_month(endpoint) if endpoint in BY_MONTH else client.iter_list(endpoint)
+        # The row keys travel with the pull, not just with the finished frame:
+        # whether a month that grew mid-read may be kept turns on whether its
+        # extra rows are distinct, which only a key can answer.
+        client.iter_list_by_month(endpoint, row_keys=ROW_KEYS.get(endpoint, ()))
+        if endpoint in BY_MONTH
+        else client.iter_list(endpoint)
     )
     return check(endpoint, to_frame(records))
 

@@ -180,9 +180,16 @@ export class WaldurClient {
    * for the caller who would rather have slightly-wrong rows than no page --
    * it is handed the counts and the rows are returned. Without it, a repeat
    * throws, which is the right default for anything feeding a headline.
+   *
+   * `onCount` is the same arrangement for the count check, and exists because
+   * this method cannot tell a short pull from a slice that grew while it was
+   * being read. It knows neither which filter it is carrying nor what the
+   * count says now, and both decide whether a mismatch is damage. A caller
+   * that can answer those -- `pullMonth` is the one -- takes the discrepancy
+   * and rules on it. Without it, a mismatch throws, as before.
    */
   async list(endpoint, {
-    pageSize = DEFAULT_PAGE_SIZE, rowKeys = null, onRepeats = null, ...filters
+    pageSize = DEFAULT_PAGE_SIZE, rowKeys = null, onRepeats = null, onCount = null, ...filters
   } = {}) {
     let url = this.url(endpoint);
     let params = { page_size: pageSize, ...filters };
@@ -212,10 +219,11 @@ export class WaldurClient {
     }
 
     if (expected !== null && rows.length !== expected) {
-      throw new WaldurError(
+      const detail =
         `${endpoint}: fetched ${rows.length} rows but the server reported ${expected}. ` +
-          'Pagination is unstable; retry.',
-      );
+        'Pagination is unstable; retry.';
+      if (!onCount) throw new WaldurError(detail);
+      onCount({ endpoint, expected, fetched: rows.length, detail });
     }
     if (rowKeys) {
       const repeats = countRepeats(rows, rowKeys);
@@ -293,34 +301,109 @@ export function countRepeats(rows, keys) {
 /** The columns that identify one usage row, from `cache.ROW_KEYS`. */
 export const USAGE_ROW_KEYS = ['allocation', 'user', 'year', 'month'];
 
+/** How many times a month is pulled before its inconsistency is reported. */
+export const MONTH_ATTEMPTS = 3;
+
+/** Waited after a failed attempt, multiplied by the attempt number. */
+export const RETRY_BACKOFF_MS = 300;
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 /**
  * Pull one calendar month of an endpoint, verified against the server's count.
  *
  * Filtering to a month shrinks the queryset to something the server enumerates
- * consistently. The count check is what turns a short page into an error here
- * rather than an under-reported month in a figure.
+ * consistently. The checks are what turn a bad page into an error here rather
+ * than an under-reported month in a figure.
+ *
+ * **The month in progress is being written to while it is read**, which is a
+ * different fault from unstable paging and needs a different answer. Usage rows
+ * land as jobs are accounted, and `X-Result-Count` is a count taken with the
+ * first page while every later page's `OFFSET` is resolved against the table as
+ * it is by then. One insert mid-crawl therefore lengthens the tail, and the
+ * pull ends holding more rows than the count promised. That is not damage, and
+ * failing the whole report over it -- which is what this used to do -- costs a
+ * reader their page for the portal doing its job.
+ *
+ * So the two checks are ranked rather than run in sequence:
+ *
+ * * **A repeated key fails, always.** It is the fault that costs rows: where
+ *   one came back twice another never came at all, and the two cancel in any
+ *   count. Nothing about a live month excuses it.
+ * * **A short pull fails.** Fewer rows than a count taken *before* the read
+ *   cannot be explained by rows arriving during it.
+ * * **An over-long pull is confirmed, not assumed.** With no repeated key,
+ *   every row in hand is a distinct real row, so the pull holds at least what
+ *   the opening count described. Re-reading the count settles the rest: if it
+ *   now equals the rows in hand, the month is exactly this many rows and
+ *   exactly these are held. Anything else is unresolved and fails.
+ *
+ * Everything above is a race, and a race is worth losing twice before it is
+ * worth reporting -- one month is a handful of requests against a cache that
+ * already holds the others. `attempts` re-pulls it; `onRetry` says so. An
+ * unreadable count header is not a race and throws straight out.
  */
-export async function pullMonth(client, endpoint, year, month, { pageSize } = {}) {
+export async function pullMonth(client, endpoint, year, month, {
+  pageSize, attempts = MONTH_ATTEMPTS, backoffMs = RETRY_BACKOFF_MS, onRetry = () => {},
+} = {}) {
+  const slice = `${endpoint} ${year}-${String(month).padStart(2, '0')}`;
+  let failure = null;
+  for (let attempt = 1; attempt <= Math.max(attempts, 1); attempt += 1) {
+    const outcome = await pullMonthOnce(client, endpoint, year, month, { pageSize, slice });
+    if (outcome.ok) return { rows: outcome.rows, expected: outcome.expected };
+    failure = outcome.error;
+    if (attempt < attempts) {
+      onRetry({ endpoint, year, month, attempt, of: attempts, detail: failure.message });
+      await sleep(backoffMs * attempt);
+    }
+  }
+  throw failure;
+}
+
+/** One attempt at a month: the rows, or the reason they cannot be trusted. */
+async function pullMonthOnce(client, endpoint, year, month, { pageSize, slice }) {
   const expected = await client.count(endpoint, { year, month });
   // Null is not zero: an unreadable header would otherwise be indistinguishable
   // from a month with no usage, and every month would "succeed" empty.
   if (expected === null) throw missingCountHeader(endpoint);
-  if (!expected) return { rows: [], expected: 0 };
-  const rows = await client.list(endpoint, { pageSize, year, month });
-  if (rows.length !== expected) {
-    throw new WaldurError(
-      `${endpoint} ${year}-${String(month).padStart(2, '0')}: fetched ${rows.length} rows ` +
-        `but the server reported ${expected}. Pagination is unstable; retry.`,
-    );
-  }
+  if (!expected) return { ok: true, rows: [], expected: 0 };
+
+  let mismatch = null;
+  const rows = await client.list(endpoint, {
+    pageSize, year, month, onCount: (detail) => { mismatch = detail; },
+  });
+
   const repeats = countRepeats(rows, USAGE_ROW_KEYS);
   if (repeats) {
-    throw new WaldurError(
-      `${endpoint} ${year}-${String(month).padStart(2, '0')}: ${repeats} of ${rows.length} ` +
-        'rows repeat a key already seen. The portal paged the month inconsistently; retry.',
-    );
+    return {
+      ok: false,
+      error: new WaldurError(
+        `${slice}: ${repeats} of ${rows.length} rows repeat a key already seen, so as many ` +
+          'are missing. The portal paged the month inconsistently.',
+      ),
+    };
   }
-  return { rows, expected };
+  if (!mismatch) return { ok: true, rows, expected };
+  if (rows.length < expected) {
+    return {
+      ok: false,
+      error: new WaldurError(
+        `${slice}: fetched ${rows.length} rows but the server reported ${expected}. ` +
+          'Pagination is unstable.',
+      ),
+    };
+  }
+
+  const now = await client.count(endpoint, { year, month });
+  if (now === null) throw missingCountHeader(endpoint);
+  if (now === rows.length) return { ok: true, rows, expected: now };
+  return {
+    ok: false,
+    error: new WaldurError(
+      `${slice}: fetched ${rows.length} distinct rows against a count of ${expected} that ` +
+        `has since moved to ${now}. The month is being written to faster than it reads.`,
+    ),
+  };
 }
 
 /**
@@ -342,6 +425,10 @@ export async function pullMonth(client, endpoint, year, month, { pageSize } = {}
  * cached month is caught by the whole-table check at the end -- the portal does
  * backfill occasionally -- and the answer to that is to drop the cache and pull
  * again, not to fail in front of the reader.
+ *
+ * `onRetry` is passed through to `pullMonth` and fires when a month is pulled
+ * again after coming back inconsistent. Worth surfacing: it is the one thing
+ * that explains a pull taking noticeably longer than the last one.
  */
 export async function pullByMonth(client, endpoint, options = {}) {
   const { cache = null } = options;
@@ -364,6 +451,8 @@ async function pullMonths(client, endpoint, {
   cache = null,
   onMonth = () => {},
   onProgress = () => {},
+  onRetry = () => {},
+  attempts = MONTH_ATTEMPTS,
 } = {}) {
   const total = await client.count(endpoint);
   if (total === null) throw missingCountHeader(endpoint);
@@ -387,7 +476,9 @@ async function pullMonths(client, endpoint, {
       let rows = null;
       if (complete && cache) rows = await cache.get(endpoint, year, month);
       if (rows === null) {
-        const pulled = await pullMonth(client, endpoint, year, month, { pageSize });
+        const pulled = await pullMonth(client, endpoint, year, month, {
+          pageSize, attempts, onRetry,
+        });
         rows = pulled.rows;
         // Only complete months are stored. The month in progress is still
         // being written to, and a cached copy of it would go stale in minutes.
@@ -410,17 +501,24 @@ async function pullMonths(client, endpoint, {
 
   // The months must add up to the table as a whole, or the window above is too
   // narrow and a year of usage is missing from every figure without saying so.
+  // Ruled on the way one month is: fewer rows than the table claimed is damage,
+  // while more is the table having grown between this count and the last page
+  // -- and every month here has already been verified row by row, so a fresh
+  // count that agrees is the whole of what is left to check.
   if (seen !== total) {
-    return {
-      ok: false,
-      cached,
-      rows,
-      error: new WaldurError(
-        `${endpoint}: ${seen} rows across months but ${total} in the table as a whole. ` +
-          'Either the window in monthsUntil is too narrow, or rows changed under the ' +
-          'pull; retry.',
-      ),
-    };
+    const now = seen > total ? await client.count(endpoint) : null;
+    if (now !== seen) {
+      return {
+        ok: false,
+        cached,
+        rows,
+        error: new WaldurError(
+          `${endpoint}: ${seen} rows across months but ${total} in the table as a whole` +
+            `${now === null ? '' : `, and ${now} in it now`}. Either the window in ` +
+            'monthsUntil is too narrow, or rows changed under the pull; retry.',
+        ),
+      };
+    }
   }
   return { ok: true, cached, rows };
 }

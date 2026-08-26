@@ -879,7 +879,37 @@ Three guards, because every failure here is silent:
   `cache.ROW_KEYS` names the columns that identify a row and `cache.check()`
   rejects the pull if any key repeats — on write *and* on read, so an older
   snapshot taken before this fix fails loudly instead of quietly reporting a
-  wildly inflated month.
+  wildly inflated month. The client runs the same test per month, which is what
+  lets it rule on the case below.
+
+### The live month grows while you read it
+
+A month that is still being written to is a *different* fault from unstable
+paging, and it took the opposite answer. `X-Result-Count` is a count taken with
+the first page, while every later page's `OFFSET` resolves against the table as
+it is by then — so a usage row landing mid-crawl lengthens the tail, and the
+pull ends holding **more** rows than the count promised. The guard above read
+that as instability and ended the run, which cost a reader their whole report
+for the portal doing its job.
+
+The checks are therefore ranked rather than run in sequence, in both
+`WaldurClient.iter_list_by_month()` and the extension's `pullMonth`:
+
+| What came back | Ruling |
+| --- | --- |
+| A repeated key | **Fail**, always — where one row came twice another never came at all, and no live month excuses that |
+| Fewer rows than the count | **Fail** — rows arriving during a read cannot explain rows missing from it |
+| More rows, no repeats, a fresh count that agrees | **Keep** — every row in hand is a distinct real row, so the pull holds at least what the opening count described, and a count equal to what is in hand settles that it holds exactly them |
+| More rows, anything else | **Fail** — unresolved |
+
+That last confirmation costs one extra count request, and only when the numbers
+disagree. The whole-table check at the end of the walk is ruled on the same way,
+since a month that legitimately grew would otherwise fail there instead.
+
+Every one of those faults is a race, so a month is re-pulled
+`client.MONTH_ATTEMPTS` times before it is reported — one month is a handful of
+requests against a pull that is otherwise done. The extension reports each retry
+through `onRetry`, because a stall on one month otherwise reads as a hang.
 
 And one check that does not depend on knowing how the pull works at all:
 [`report reconcile`](#reconcile--from-openportal-allocation-user-usage--invoices)

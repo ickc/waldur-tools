@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 
 import {
-  WaldurClient, WaldurError, assertMonthFilterWorks, countRepeats, monthsUntil,
+  MONTH_ATTEMPTS, WaldurClient, WaldurError, assertMonthFilterWorks, countRepeats, monthsUntil,
   parseLinkHeader, pullByMonth, pullMonth,
 } from '../src/api.js';
 
@@ -75,6 +75,41 @@ function portal(rows, { corrupt = (page) => page, countOverride = null } = {}) {
       headers.Link = `<${next}>; rel="next"`;
     }
     return reply(slice, { headers, url: String(url) });
+  };
+  return calls;
+}
+
+/**
+ * A stub portal whose month grows while it is being read.
+ *
+ * The live month does this all day: usage rows land as jobs are accounted, and
+ * `X-Result-Count` is a count taken with the first page while every later
+ * page's `OFFSET` resolves against the table as it is by then. `insertAfter`
+ * names the request numbers -- counting every request, the count requests
+ * included -- after which one new row appears.
+ */
+function livePortal(rows, { insertAfter = [] } = {}) {
+  const table = [...rows];
+  const calls = [];
+  globalThis.fetch = async (target) => {
+    const url = new URL(target);
+    const params = url.searchParams;
+    calls.push({ path: url.pathname, params: Object.fromEntries(params) });
+
+    const size = Number(params.get('page_size') ?? 200);
+    const page = Number(params.get('page') ?? 1);
+    const headers = { 'x-result-count': String(table.length) };
+    if (page * size < table.length) {
+      const next = new URL(url);
+      next.searchParams.set('page', String(page + 1));
+      headers.Link = `<${next}>; rel="next"`;
+    }
+    const body = table.slice((page - 1) * size, page * size);
+    if (insertAfter.includes(calls.length)) {
+      const [row] = usageRows(1);
+      table.push({ ...row, username: `late${table.length}`, user: `late${table.length}` });
+    }
+    return reply(body, { headers, url: String(url) });
   };
   return calls;
 }
@@ -210,7 +245,7 @@ describe('pulling one month', () => {
     // A page that comes back short is the signature of unstable paging.
     portal(usageRows(300), { corrupt: (page) => page.slice(0, -5) });
     await assert.rejects(
-      () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200 }),
+      () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200, backoffMs: 0 }),
       (error) => /Pagination is unstable/.test(error.message),
     );
   });
@@ -222,7 +257,7 @@ describe('pulling one month', () => {
       corrupt: (page) => [...page.slice(0, -1), page[0]],
     });
     await assert.rejects(
-      () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200 }),
+      () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200, backoffMs: 0 }),
       (error) => /rows repeat a key already seen/.test(error.message),
     );
   });
@@ -249,6 +284,78 @@ describe('pulling one month', () => {
     assert.deepEqual(rows, []);
     // One count request, and no page request behind it.
     assert.equal(calls.length, 1);
+  });
+
+  it('re-pulls a month that came back inconsistent and takes the clean attempt', async () => {
+    // Every fault here is a race, and a race is worth losing once before it is
+    // worth a reader's whole report.
+    let firstAttempt = true;
+    portal(usageRows(300), {
+      corrupt: (page, pageNumber) => {
+        if (!firstAttempt || pageNumber !== 2) return page;
+        firstAttempt = false;
+        return page.slice(0, -5);
+      },
+    });
+    const retries = [];
+    const { rows } = await pullMonth(client(), ENDPOINT, 2026, 2, {
+      pageSize: 200, backoffMs: 0, onRetry: (report) => retries.push(report),
+    });
+    assert.equal(rows.length, 300);
+    assert.equal(retries.length, 1);
+    assert.match(retries[0].detail, /Pagination is unstable/);
+  });
+
+  it('gives up once the attempts are spent, and reports the last failure', async () => {
+    portal(usageRows(300), { corrupt: (page) => page.slice(0, -5) });
+    const retries = [];
+    await assert.rejects(
+      () => pullMonth(client(), ENDPOINT, 2026, 2, {
+        pageSize: 200, backoffMs: 0, onRetry: (report) => retries.push(report),
+      }),
+      (error) => /Pagination is unstable/.test(error.message),
+    );
+    // One notice per retry, not per attempt: the last attempt is not a retry.
+    assert.equal(retries.length, MONTH_ATTEMPTS - 1);
+  });
+
+  it('accepts a month that grew mid-read once the count catches up', async () => {
+    // The live month: a row lands between the first page and the last, so the
+    // pull ends holding one more row than the opening count promised. No key
+    // repeats, so every row in hand is a distinct real row -- and a fresh count
+    // that matches settles that these are all of them.
+    const calls = livePortal(usageRows(300), { insertAfter: [2] });
+    const { rows, expected } = await pullMonth(client(), ENDPOINT, 2026, 2, {
+      pageSize: 200, backoffMs: 0,
+    });
+    assert.equal(rows.length, 301);
+    // Reported against the count that confirmed it, not the one it opened with.
+    assert.equal(expected, 301);
+    assert.equal(countRepeats(rows, ['allocation', 'user', 'year', 'month']), 0);
+    // The confirming count is a request, and only spent when the numbers differ.
+    assert.equal(calls.length, 4);
+  });
+
+  it('does not accept an over-long pull the count cannot confirm', async () => {
+    // Growing again between the last page and the confirming count leaves the
+    // two numbers apart, which is exactly the case that cannot be ruled on.
+    livePortal(usageRows(300), { insertAfter: [2, 3] });
+    await assert.rejects(
+      () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200, backoffMs: 0, attempts: 1 }),
+      (error) => /written to faster than it reads/.test(error.message),
+    );
+  });
+
+  it('never accepts an over-long pull that repeats a key', async () => {
+    // Over-length is forgivable; a repeat is not, whatever the count says. A
+    // row handed back twice means another was not handed back at all.
+    portal(usageRows(300), {
+      corrupt: (page, pageNumber) => (pageNumber === 2 ? [...page, page[0], page[1]] : page),
+    });
+    await assert.rejects(
+      () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200, backoffMs: 0, attempts: 1 }),
+      (error) => /rows repeat a key already seen/.test(error.message),
+    );
   });
 });
 
