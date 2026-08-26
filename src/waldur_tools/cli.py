@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -345,11 +347,27 @@ def main() -> None:
 
     A missing token, an absent snapshot and a rejected request are all things
     the user can fix; a traceback for any of them is noise.
+
+    One class of failure is not the user's to fix at all: the portal is a live
+    database, and a table written to while it is read can defeat the paging
+    guards however carefully they are written. Those carry ``transient``, and
+    are worth more than a message -- the run has already re-pulled each month
+    several times, so what is left really is to run the whole thing again, and
+    the command comes back with the advice rather than leaving it to be
+    reconstructed from scrollback.
     """
     try:
         app()
     except (MissingTokenError, SnapshotError, WaldurError) as error:
         error_console.print(f"[red]{error}[/]")
+        if getattr(error, "transient", False):
+            command = shlex.join([Path(sys.argv[0]).name, *sys.argv[1:]])
+            error_console.print(
+                "\n[yellow]Nothing is wrong with the command or with what is already "
+                "cached: the portal was being written to while it was read, and every "
+                "month was re-pulled several times before giving up. Run it again:[/]\n"
+            )
+            error_console.print(f"  [bold]{command}[/]")
         raise SystemExit(2) from error
 
 

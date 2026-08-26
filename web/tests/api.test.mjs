@@ -346,6 +346,23 @@ describe('pulling one month', () => {
     );
   });
 
+  it('marks a month it gave up on as transient, and a config fault as not', async () => {
+    // What the report keys its "try again" advice off. A race that did not
+    // settle is worth pressing the button for; a header the deployment stopped
+    // exposing is not, and telling a reader otherwise wastes their time.
+    portal(usageRows(300), { corrupt: (page) => page.slice(0, -5) });
+    await assert.rejects(
+      () => pullMonth(client(), ENDPOINT, 2026, 2, { pageSize: 200, backoffMs: 0 }),
+      (error) => error.transient === true,
+    );
+
+    globalThis.fetch = async (target) => reply([], { url: String(target) });
+    await assert.rejects(
+      () => pullMonth(client(), ENDPOINT, 2026, 2),
+      (error) => /X-Result-Count/.test(error.message) && error.transient === false,
+    );
+  });
+
   it('never accepts an over-long pull that repeats a key', async () => {
     // Over-length is forgivable; a repeat is not, whatever the count says. A
     // row handed back twice means another was not handed back at all.

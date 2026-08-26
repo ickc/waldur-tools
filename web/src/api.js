@@ -30,7 +30,20 @@ export const EARLIEST_MONTH = [2024, 1];
 /** How many months are fetched at once. */
 export const CONCURRENCY = 6;
 
-export class WaldurError extends Error {}
+export class WaldurError extends Error {
+  /**
+   * `transient` marks the failures whose only cure is to run again: the portal
+   * being written to while it is read. Everything the paging guards catch has
+   * already been re-pulled `MONTH_ATTEMPTS` times by the time it is thrown, so
+   * the flag means "and it still did not settle" rather than "this is
+   * untried". The report offers the button either way -- there is nothing else
+   * on that page to press -- but only says it is worth pressing for these.
+   */
+  constructor(message, { transient = false } = {}) {
+    super(message);
+    this.transient = transient;
+  }
+}
 
 /** Every `[year, month]` from `start` up to the month containing `today`. */
 export function monthsUntil(today, start = EARLIEST_MONTH) {
@@ -380,6 +393,7 @@ async function pullMonthOnce(client, endpoint, year, month, { pageSize, slice })
       error: new WaldurError(
         `${slice}: ${repeats} of ${rows.length} rows repeat a key already seen, so as many ` +
           'are missing. The portal paged the month inconsistently.',
+        { transient: true },
       ),
     };
   }
@@ -390,6 +404,7 @@ async function pullMonthOnce(client, endpoint, year, month, { pageSize, slice })
       error: new WaldurError(
         `${slice}: fetched ${rows.length} rows but the server reported ${expected}. ` +
           'Pagination is unstable.',
+        { transient: true },
       ),
     };
   }
@@ -402,6 +417,7 @@ async function pullMonthOnce(client, endpoint, year, month, { pageSize, slice })
     error: new WaldurError(
       `${slice}: fetched ${rows.length} distinct rows against a count of ${expected} that ` +
         `has since moved to ${now}. The month is being written to faster than it reads.`,
+      { transient: true },
     ),
   };
 }
@@ -515,7 +531,8 @@ async function pullMonths(client, endpoint, {
         error: new WaldurError(
           `${endpoint}: ${seen} rows across months but ${total} in the table as a whole` +
             `${now === null ? '' : `, and ${now} in it now`}. Either the window in ` +
-            'monthsUntil is too narrow, or rows changed under the pull; retry.',
+            'monthsUntil is too narrow, or rows changed under the pull.',
+          { transient: true },
         ),
       };
     }

@@ -911,6 +911,26 @@ Every one of those faults is a race, so a month is re-pulled
 requests against a pull that is otherwise done. The extension reports each retry
 through `onRetry`, because a stall on one month otherwise reads as a hang.
 
+### Saying so when the only cure is another run
+
+A race that survives all of that is nobody's mistake, and the one useful thing to
+say about it is "run it again" — which is only advice if it comes with something
+to run. So those failures are marked: `WaldurError(..., transient=True)`, and
+`SnapshotError` alike.
+
+- **The CLI** prints the command back, as it was invoked and with its arguments
+  quoted to be pasted. `cli.main()` does it in one place, and only for the marked
+  failures: telling someone to try again after a rejected token or a dropped
+  filter costs a run and fixes nothing.
+- **The extension** puts a *button* in the error box rather than the word
+  "retry". The refresh control is in the controls bar, which is not where anyone
+  looks after watching the page fail — and after a failure in the first wave it
+  is not on screen at all. The button re-runs the same work rather than reloading,
+  so the cached months stay and only what failed is fetched, and a second failure
+  comes back with the button still there. A marked failure also gets a sentence
+  saying the portal changed under the read, which is the difference between
+  pressing the button and filing a bug.
+
 And one check that does not depend on knowing how the pull works at all:
 [`report reconcile`](#reconcile--from-openportal-allocation-user-usage--invoices)
 puts the summed node hours beside `invoices.incurred_costs` for the same month.

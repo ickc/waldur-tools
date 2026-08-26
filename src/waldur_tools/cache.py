@@ -77,7 +77,19 @@ META_FILENAME = "meta.json"
 
 
 class SnapshotError(RuntimeError):
-    """A snapshot could not be read or written."""
+    """A snapshot could not be read or written.
+
+    ``transient`` carries the same meaning as on
+    :class:`waldur_tools.client.WaldurError`: the run failed on something that
+    was nobody's mistake and may well not happen twice, so the CLI hands the
+    command back rather than leaving the reader to reconstruct it.
+    """
+
+    transient = False
+
+    def __init__(self, *args: object, transient: bool = False) -> None:
+        super().__init__(*args)
+        self.transient = transient
 
 
 def _filename(endpoint: str) -> str:
@@ -204,7 +216,8 @@ def check(endpoint: str, frame: pl.DataFrame) -> pl.DataFrame:
         raise SnapshotError(
             f"{endpoint}: {repeats} of {frame.height} rows repeat a "
             f"({', '.join(keys)}) already seen. The portal paged the table "
-            "inconsistently; retry the snapshot."
+            "inconsistently.",
+            transient=True,
         )
     return frame
 

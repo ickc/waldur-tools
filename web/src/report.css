@@ -159,6 +159,10 @@ th { color: var(--ink); font-weight: 600; }
   color: var(--ink-soft);
 }
 .error h2 { color: var(--critical); }
+/* The one thing a reader can do about a failure, so it is a button and not a
+   sentence telling them to find one. */
+.error button { margin-top: 14px; }
+.error .hint { font-size: .88rem; color: var(--muted); }
 
 /* A figure whose readings are older than the page it is on. Written on every
    refresh and empty when there is nothing wrong, so it has to collapse rather

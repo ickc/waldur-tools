@@ -416,10 +416,50 @@ function renderReconcile(rows, invoices, customer) {
       `month">usage reconciles with ${checked.length} months of invoices</span>`;
 }
 
-function showError(heading, error) {
+/**
+ * What the reader is told about a failure, and what they can press about it.
+ *
+ * A message ending in "retry" is only advice if there is something to retry
+ * with. The refresh button lives in the controls bar, which is not where anyone
+ * is looking after watching the page fail -- and after a failure in the first
+ * wave it is not on screen at all. So the action goes in the error itself, and
+ * `retry` is the thing to run again: the same work, not a reload, so the cached
+ * months are still there and only what failed is fetched.
+ */
+function showError(heading, error, { retry = null, label = 'Try again' } = {}) {
+  const hint = error.transient ? `<p class="hint">${esc(TRANSIENT_HINT)}</p>` : '';
   el('errors').innerHTML =
-    `<div class="error"><h2>${esc(heading)}</h2><p>${esc(error.message)}</p></div>`;
+    `<div class="error"><h2>${esc(heading)}</h2><p>${esc(error.message)}</p>${hint}</div>`;
+  if (!retry) return;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'primary';
+  button.textContent = label;
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    button.textContent = 'Trying again…';
+    try {
+      await retry();
+      clearError();
+    } catch (again) {
+      // Straight back to the same box, button and all: a second failure must
+      // not be the one that leaves the reader with nothing to press.
+      showError(heading, again, { retry, label });
+    }
+  });
+  el('errors').querySelector('.error').append(button);
 }
+
+/**
+ * Said whenever a failure carries `transient`, because "the portal changed
+ * under us" is not a thing a reader can be expected to infer from a row count,
+ * and it is the difference between pressing the button and filing a bug.
+ */
+const TRANSIENT_HINT =
+  'This is the portal being written to while it was read — a live database doing its job, '
+  + 'not a fault in the report or in what is cached here. Every month was already fetched '
+  + 'several times over before this gave up, so trying again usually clears it.';
 
 function clearError() {
   el('errors').innerHTML = '';
@@ -505,7 +545,10 @@ async function run({ refresh = false } = {}) {
 
   // The tail: neither figure below blocks anything above it, and the page is
   // already complete and readable without them.
-  loadExtras().catch((error) => showError('Could not load the supporting figures', error));
+  loadExtras().catch((error) => showError('Could not load the supporting figures', error, {
+    retry: () => loadExtras(),
+    label: 'Load them again',
+  }));
 }
 
 /**
@@ -775,11 +818,18 @@ async function build({ token, apiUrl, fromPortal }) {
     // anything can throw. What decides this is whether the reader has something
     // to read -- a failure in the first wave leaves an empty page whose only
     // useful control, the token box, is on the gate.
-    if (!state.headRendered) showGate(error.message);
-    else {
+    if (!state.headRendered) {
+      // The gate's own button is the retry here, so all it needs is the reason
+      // to press it rather than to go looking for what went wrong.
+      showGate(error.transient ? `${error.message} ${TRANSIENT_HINT}` : error.message);
+    } else {
       showError(
         error instanceof WaldurError ? 'The portal pull did not complete' : 'Something broke',
         error,
+        // Not `refresh: true`: the complete months already cached are not what
+        // failed, and re-fetching a year of them to get at one bad month would
+        // turn a button press into another minute of waiting.
+        { retry: () => run() },
       );
     }
   } finally {
@@ -878,7 +928,7 @@ el('refresh').addEventListener('click', async () => {
   try {
     await run({ refresh: true });
   } catch (error) {
-    showError('Refresh failed', error);
+    showError('Refresh failed', error, { retry: () => run({ refresh: true }) });
   }
 });
 

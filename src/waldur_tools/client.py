@@ -86,7 +86,22 @@ def months_until(today: date, start: tuple[int, int] = EARLIEST_MONTH) -> Iterat
 
 
 class WaldurError(RuntimeError):
-    """An API call failed."""
+    """An API call failed.
+
+    ``transient`` marks the ones whose only cure is to run the command again:
+    the portal being written to while it is read. Everything the guards below
+    can catch has already been re-pulled :const:`MONTH_ATTEMPTS` times by the
+    time it is raised, so the flag means "and it still did not settle", not
+    "this has not been tried". The CLI prints the command back for those and
+    nothing extra for the rest -- telling someone to try again after a rejected
+    token or a dropped filter only wastes another run.
+    """
+
+    transient = False
+
+    def __init__(self, *args: object, transient: bool = False) -> None:
+        super().__init__(*args)
+        self.transient = transient
 
 
 class WaldurClient:
@@ -287,7 +302,8 @@ class WaldurClient:
                 raise WaldurError(
                     f"{endpoint}: {seen} rows across months but {total} in the table as a "
                     f"whole{moved}. Either the window in client.months_until is too "
-                    "narrow, or rows changed under the pull; retry."
+                    "narrow, or rows changed under the pull.",
+                    transient=True,
                 )
 
     def _pull_month(
@@ -332,14 +348,16 @@ class WaldurClient:
         if repeats:
             return rows, WaldurError(
                 f"{name}: {repeats} of {len(rows)} rows repeat a key already seen, so as "
-                "many are missing. The portal paged the month inconsistently."
+                "many are missing. The portal paged the month inconsistently.",
+                transient=True,
             )
         if len(rows) == expected:
             return rows, None
         if len(rows) < expected:
             return rows, WaldurError(
                 f"{name}: fetched {len(rows)} rows but the server reported {expected}. "
-                "Pagination is unstable."
+                "Pagination is unstable.",
+                transient=True,
             )
         # More rows than the count promised and none of them a repeat: the month
         # grew while it was read. Only a count that agrees with what is in hand
@@ -354,7 +372,8 @@ class WaldurClient:
             return rows, None
         return rows, WaldurError(
             f"{name}: fetched {len(rows)} distinct rows against a count of {expected} that "
-            f"has since moved to {now}. The month is being written to faster than it reads."
+            f"has since moved to {now}. The month is being written to faster than it reads.",
+            transient=True,
         )
 
     def list(self, endpoint: str, **filters: Any) -> list[JsonDict]:
