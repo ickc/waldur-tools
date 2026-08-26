@@ -221,8 +221,11 @@ export const PROSE = {
     'the reading that decides whether writes failed, and the default. <em>End</em> is the ' +
     'level carried into the next month, and <em>median</em> is the typical level, unmoved ' +
     "by a single day's spike. Colour is the percentage of the quota rather than the size, " +
-    'because every project holds the same limit and only the fraction says who is in ' +
-    'trouble; the <em>size</em> views and every tooltip give the bytes. A month marked ' +
+    'because a quota can be raised for one project and not another: full is 100% of ' +
+    'whatever that row was granted, and it is the same colour everywhere on the grid, ' +
+    'where a terabyte count means a different thing on every row. On a size ramp the ' +
+    'project given the most room would be drawn as the one in the most trouble. The ' +
+    '<em>size</em> views and every tooltip give the bytes. A month marked ' +
     '<code>*</code> was not observed on every day.',
   'storage-users':
     'The same reading, per person. Home is a hundredth the size of scratch, so the two are ' +

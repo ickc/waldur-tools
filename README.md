@@ -174,12 +174,15 @@ which is the reading that decides whether writes actually failed. A mean is
 deliberately not offered: averaging a slowly drifting level is close to
 meaningless, and it hides the peak.
 
-**Colour is a percentage, not a size.** Every project on the machine holds the
-same limit, so a size ramp would mostly redraw the limit rather than the
-pressure, and home is a hundredth the size of scratch so the two are never
-comparable as sizes anyway. The ramp is linear from empty to full and ends in
-red, because the only part anyone acts on is the top of that range. Sizes are on
-every tooltip, and the project figure offers them as a view.
+**Colour is a percentage, not a size.** Quotas are uniform by default but not by
+rule — a project or a person can be granted more — so a byte count means a
+different thing on every row of the grid, while 100% means the same thing on all
+of them: writes fail. On a size ramp whoever was granted the most room would be
+painted as the one in the most trouble. Home is also a fraction of the size of
+scratch, so those two are never comparable as sizes at all. The ramp is linear
+from empty to full and ends in red, because the only part anyone acts on is the
+top of that range. Sizes are on every tooltip, and the project figure offers
+them as a view.
 
 The daily series behind all this is deliberately *not* shipped: a year of it is
 tens of thousands of readings, which is too much to embed in a self-contained

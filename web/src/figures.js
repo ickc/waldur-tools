@@ -814,8 +814,9 @@ function storageHeatmap(rows, { views, heading, leftMargin }) {
  * The project quota is one filesystem, so the buttons spend themselves on the
  * statistic and on an absolute view instead: a fill percentage answers "is this
  * about to fail", and the size view answers "how much is actually there", which
- * matters when every project carries the same limit and the percentages alone
- * cannot tell a large project from a small one.
+ * the percentages cannot. The fill ramp is linear to full, so every project
+ * comfortably inside its quota is the same pale colour whatever it holds; the
+ * size views are log10 bytes and spread that end out.
  */
 export function figureStorageProjects(monthly) {
   const rows = monthly
