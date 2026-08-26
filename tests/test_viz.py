@@ -18,6 +18,7 @@ def snapshot(
     associations,
     accounting_summary,
     usage_reports,
+    storage_reports,
     user_usage_rows,
     users,
     projects,
@@ -31,6 +32,7 @@ def snapshot(
     snap.write("openportal-associations", to_frame(associations))
     snap.write("openportal-accounting-summary", to_frame(accounting_summary))
     snap.write("openportal-project-usage-reports", to_frame(usage_reports))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
     snap.write("openportal-allocation-user-usage", to_frame(user_usage_rows))
     snap.write_meta({})
     return snap
@@ -90,6 +92,8 @@ def test_every_figure_is_present(page):
         "Which projects are alive",
         "How concentrated we are",
         "Are more people using it?",
+        "How full the project disks are",
+        "How full people",
     ):
         assert heading in page, heading
 
@@ -339,3 +343,236 @@ def test_the_awarded_percentage_agrees_between_prose_and_tile(snapshot):
     tile = re.search(r'Awarded to projects</div><div class="value">(\d+)%', page)
     assert prose and tile
     assert prose.group(1) == tile.group(1)
+
+
+# -- storage quotas ---------------------------------------------------------
+
+
+def test_quota_colour_is_a_bounded_fraction_on_a_linear_scale(snapshot):
+    """The departure from the node-hour heatmap, and the reason it reads.
+
+    A fill percentage runs 0 to 100 and the whole decision lives at the top of
+    that range. On the log ramp the activity heatmap uses, half-full and
+    nearly-full would sit a few pixels apart.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_projects(monthly)
+    trace = figure.data[0]
+    assert (trace.zmin, trace.zmax) == (0, viz.FILL_CEILING)
+    assert list(trace.colorbar.ticktext) == ["0", "25%", "50%", "75%", "100%"]
+
+
+def test_quota_figures_carry_their_own_ramp(snapshot):
+    """Named, so a theme repaint cannot hand them the activity blues."""
+    monthly = reports.storage_monthly(snapshot)
+    for figure in (
+        viz.figure_storage_projects(monthly),
+        viz.figure_storage_users(monthly),
+    ):
+        assert figure.data[0].meta == {"ramp": "fill"}
+
+
+def test_the_quota_figures_keep_the_report_to_its_own_organisation(
+    tmp_path,
+    allocations,
+    associations,
+    accounting_summary,
+    usage_reports,
+    storage_reports,
+    user_usage_rows,
+    users,
+    projects,
+    customers,
+):
+    """Storage is scoped the way every other figure on the page is.
+
+    The endpoint reports every project the token can see, which on this portal
+    spans more than one organisation. A page headed by one customer's name that
+    drew another's disks would be wrong in the way that is hardest to notice:
+    the row labels are project codes, and nothing on the figure says whose.
+    """
+    elsewhere = {
+        **allocations[0],
+        "url": f"{allocations[0]['url']}elsewhere/",
+        "uuid": "zzz",
+        "project_name": "Elsewhere",
+        "project_uuid": "pz",
+        "customer_name": "Other Uni",
+        "groupname": "brics.zzz9",
+        "backend_id": "zzz9.brics",
+    }
+    snap = Snapshot.create(tmp_path, "two-customers")
+    snap.write("users", to_frame(users))
+    snap.write("customers", to_frame(customers))
+    snap.write("projects", to_frame(projects))
+    snap.write("openportal-allocations", to_frame([*allocations, elsewhere]))
+    snap.write("openportal-associations", to_frame(associations))
+    snap.write("openportal-accounting-summary", to_frame(accounting_summary))
+    snap.write("openportal-project-usage-reports", to_frame(usage_reports))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
+    snap.write("openportal-allocation-user-usage", to_frame(user_usage_rows))
+    snap.write_meta({})
+
+    page = viz.render(snap, customer="UKRI")
+    assert "zzz9" not in markup_only(page)
+    # The other organisation's projects are administered by this token, so
+    # widening the report to every project it can see does draw them.
+    assert "zzz9" in markup_only(viz.render(snap, customer=None))
+
+
+def test_the_size_views_leave_the_quota_ramp_behind(snapshot):
+    """A bounded fraction ends in red; an unbounded magnitude stays one hue.
+
+    The size views are `log10` bytes with no ceiling, so drawing them on the
+    quota ramp would paint a large project red for being large -- the opposite
+    of what that colour means on every other view of the same figure. The ramp
+    is switched by name as well as by value, so a theme repaint keeps it.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_projects(monthly)
+    assert figure.data[0].meta == {"ramp": "fill"}
+    assert list(figure.data[0].colorscale[-1]) == [1.0, viz.RAMP_FILL_LIGHT[-1]]
+
+    buttons = {button.label: button.args[0] for button in figure.layout.updatemenus[0].buttons}
+    for label in ("Peak", "End", "Median"):
+        assert buttons[label]["meta.ramp"] == "fill"
+        assert buttons[label]["colorscale"][0][-1][1] == viz.RAMP_FILL_LIGHT[-1]
+    for label in ("Peak size", "End size", "Median size"):
+        assert buttons[label]["meta.ramp"] == "activity"
+        assert buttons[label]["colorscale"][0][-1][1] == viz.RAMP_LIGHT[-1]
+
+
+def test_the_page_puts_a_switched_ramp_back_in_the_readers_theme(page):
+    """The buttons carry a light-mode scale; the reader may not be in one.
+
+    A button's arguments are fixed when the page is written, so the repaint has
+    to re-assert the ramp on every restyle rather than only on a theme change.
+    """
+    assert "function fixRamps(" in page
+    assert "plotly_restyle" in page
+
+
+def test_a_month_short_of_readings_is_marked_on_the_axis(snapshot):
+    """A column standing on one reading is not comparable with one on thirty."""
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_projects(monthly)
+    assert all(label.endswith("*") for label in figure.data[0].x)
+
+
+def test_quota_rows_put_the_fullest_at_the_top(snapshot):
+    """Plotly draws the first row at the bottom, so ascending peak is correct."""
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_users(monthly)
+    peaks = []
+    for label in figure.data[0].y:
+        username, code = label.split(" · ")
+        rows = monthly.filter((pl.col("username") == username) & (pl.col("project_code") == code))
+        peaks.append(max(value or -1 for value in rows["peak_fill_pct"].to_list()))
+    assert peaks == sorted(peaks)
+
+
+def test_quota_buttons_are_one_flat_row(snapshot):
+    """Flat rather than two groups, because plotly's groups do not compose.
+
+    A second row of buttons would silently reset the first, and a control that
+    undoes another control is worse than a longer row of honest ones.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    projects = viz.figure_storage_projects(monthly)
+    assert len(projects.layout.updatemenus) == 1
+    assert [button.label for button in projects.layout.updatemenus[0].buttons] == [
+        "Peak",
+        "End",
+        "Median",
+        "Peak size",
+        "End size",
+        "Median size",
+    ]
+    users = viz.figure_storage_users(monthly)
+    assert [button.label for button in users.layout.updatemenus[0].buttons] == [
+        "Home peak",
+        "Home end",
+        "Home median",
+        "Scratch peak",
+        "Scratch end",
+        "Scratch median",
+    ]
+
+
+def test_every_quota_cell_names_its_size_and_its_evidence(snapshot):
+    """No button carries the size for people, so the tooltip always must."""
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_users(monthly)
+    hovers = [text for row in figure.data[0].text for text in row if text != "no reading"]
+    assert hovers
+    assert all("days" in text for text in hovers)
+    assert all(any(unit in text for unit in ("KB", "MB", "GB", "TB")) for text in hovers)
+
+
+def test_quota_titles_are_kept_clear_of_the_view_buttons(snapshot):
+    """The one geometry a spec test can pin, because the browser found it first.
+
+    Three things want the strip above the plot: plotly's modebar, the button
+    row and the title. A centred title and a right-anchored row of six buttons
+    grow towards each other, and the narrower the window the sooner they touch.
+    The extension hit exactly that and answered it with a title pinned left in
+    container coordinates over a top margin deep enough for two bands; these
+    are the only figures on this side carrying a title of their own, so they
+    are the only ones that needed the same answer.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    for figure in (viz.figure_storage_projects(monthly), viz.figure_storage_users(monthly)):
+        assert figure.layout.title.xanchor == "left"
+        assert figure.layout.title.xref == "container"
+        # The button row sits at y=1.03 in paper coordinates and is about 30px
+        # tall; the title needs a band of its own above that.
+        assert figure.layout.margin.t >= 96
+        assert figure.layout.updatemenus[0].buttons
+
+
+def test_a_cell_only_says_of_when_one_quota_held_all_month(snapshot):
+    """ "X of Y" is arithmetic, and it is not written where it does not hold.
+
+    Alice's scratch quota is raised mid-January, so the month's percentage and
+    its size are taken against different limits and the sentence relating them
+    would be false. Both figures survive; only the relation comes off.
+    """
+    monthly = reports.storage_monthly(snapshot)
+    figure = viz.figure_storage_users(monthly)
+    labels = [label for label in figure.data[0].y if label.startswith("alice")]
+    assert labels
+    row = list(figure.data[0].y).index(labels[0])
+    scratch = next(
+        button
+        for button in figure.layout.updatemenus[0].buttons
+        if button.label == "Scratch median"
+    )
+    hover = next(text for text in scratch.args[0]["text"][0][row] if text != "no reading")
+    assert "% full" in hover
+    assert "quota not the same on every reading" in hover
+    # "3 of 31 days read" is the evidence clause and belongs there; what must
+    # not appear is a size written as a fraction of a quota.
+    assert " of " not in hover.split(" · ")[0]
+    # The month where the quota did hold still says what it was.
+    home = next(
+        button for button in figure.layout.updatemenus[0].buttons if button.label == "Home median"
+    )
+    steady = [text for text in home.args[0]["text"][0][row] if text != "no reading"]
+    assert steady and all(" of 100.00 GB" in text for text in steady)
+
+
+def test_quota_figures_are_absent_rather_than_empty(tmp_path, allocations):
+    """A snapshot that never pulled storage loses two figures, not the report."""
+    snap = Snapshot.create(tmp_path, "bare")
+    snap.write("openportal-allocations", to_frame(allocations))
+    snap.write_meta({})
+    monthly = reports.storage_monthly(snap)
+    assert viz.figure_storage_projects(monthly) is None
+    assert viz.figure_storage_users(monthly) is None
+
+
+def test_the_page_says_so_when_the_readings_have_gone_stale(snapshot):
+    """The columns simply stop, and nothing else on the page would say why."""
+    current = reports.storage(snapshot)
+    assert "readings stop on" in viz._storage_staleness(current)
+    assert viz._storage_staleness(current.head(0)) == ""

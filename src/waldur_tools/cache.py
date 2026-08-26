@@ -77,7 +77,19 @@ META_FILENAME = "meta.json"
 
 
 class SnapshotError(RuntimeError):
-    """A snapshot could not be read or written."""
+    """A snapshot could not be read or written.
+
+    ``transient`` carries the same meaning as on
+    :class:`waldur_tools.client.WaldurError`: the run failed on something that
+    was nobody's mistake and may well not happen twice, so the CLI hands the
+    command back rather than leaving the reader to reconstruct it.
+    """
+
+    transient = False
+
+    def __init__(self, *args: object, transient: bool = False) -> None:
+        super().__init__(*args)
+        self.transient = transient
 
 
 def _filename(endpoint: str) -> str:
@@ -175,7 +187,12 @@ def fetch(client: WaldurClient, endpoint: str) -> pl.DataFrame:
     inflated monthly totals the snapshot no longer has.
     """
     records = (
-        client.iter_list_by_month(endpoint) if endpoint in BY_MONTH else client.iter_list(endpoint)
+        # The row keys travel with the pull, not just with the finished frame:
+        # whether a month that grew mid-read may be kept turns on whether its
+        # extra rows are distinct, which only a key can answer.
+        client.iter_list_by_month(endpoint, row_keys=ROW_KEYS.get(endpoint, ()))
+        if endpoint in BY_MONTH
+        else client.iter_list(endpoint)
     )
     return check(endpoint, to_frame(records))
 
@@ -199,7 +216,8 @@ def check(endpoint: str, frame: pl.DataFrame) -> pl.DataFrame:
         raise SnapshotError(
             f"{endpoint}: {repeats} of {frame.height} rows repeat a "
             f"({', '.join(keys)}) already seen. The portal paged the table "
-            "inconsistently; retry the snapshot."
+            "inconsistently.",
+            transient=True,
         )
     return frame
 

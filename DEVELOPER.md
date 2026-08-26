@@ -553,6 +553,108 @@ figures. Output is one row per project/resource/day.
 
 monthly rows expand roughly thirtyfold into daily ones.
 
+### `storage` and `storage-monthly` — from `openportal-project-storage-reports`
+
+The other report that reshapes, and the fiddlier of the two. Each source row is
+a project/resource/month carrying a `report` blob, and **the blob comes in two
+shapes**: a finished month has a `daily_reports` dictionary keyed by date, while
+the month in progress has no such key at all and carries only the top-level
+snapshot. Both are read. That is not belt-and-braces — the top-level snapshot of
+a finished month is generated *after* its last daily entry, so it is the only
+place the last day of any month is ever reported, and it is the sole reading the
+open month has.
+
+Two more properties of the source that the parsing has to respect:
+
+- **A day is sampled more than once.** The same filesystem is reported under
+  every `resource` the project holds, by collectors running minutes apart, and
+  their figures legitimately differ by whatever was written in between. These
+  are repeat measurements of one quantity — storage belongs to the filesystem,
+  not to the cluster — so they are kept as separate samples rather than
+  deduplicated. Collapsing them would halve the evidence and make `peak` one
+  collector's opinion of the peak.
+- **Sizes are 1024-based.** The collector writes `"100.00 GB"` for the quota
+  `lfs quota -h` calls `100G`, so its "GB" is a GiB. Only the absolute views
+  depend on that reading; `fill_pct` divides two figures carrying the same unit.
+
+`storage_samples()` is the shared tidy frame both reports and both figures are
+built from — one row per scope, filesystem and sample. It takes the same
+`scope` and `customer` filters as the monthly reports, and the visual report
+passes its own `customer` down: the endpoint answers for every project the
+token administers, which spans more than one organisation, and a page headed by
+one customer's name must not draw another's disks. `storage_now()` and
+`storage_by_month()` are the two aggregations over an already-parsed frame, so
+a caller wanting both — the visual report wants the heatmap and the table under
+it — pays for one read of the endpoint rather than two, and cannot end up with
+a figure and a table describing different pulls.
+
+| Column | Derivation |
+| --- | --- |
+| `usage_bytes`, `limit_bytes` | the blob's size strings parsed to bytes; **null** if the string is not a size, e.g. an unlimited quota |
+| `fill_pct` | `100 * usage_bytes / limit_bytes`, **null** rather than a division when the limit is missing or zero |
+| `kind` | `project` for the `projects` quota, `user` for `home` and `scratch` |
+
+`storage` then keeps the newest sample per quota, sorted fullest first.
+`storage-monthly` reduces each quota to one row per month:
+
+| Column | Derivation |
+| --- | --- |
+| `peak_*` | the maximum over every sample in the month — the reading that decides whether writes failed |
+| `end_*` | the last sample by `generated_at` — the level carried into the next month |
+| `median_*` | the median over every sample, robust to one day's spike |
+| `limit_bytes` | the quota **every** sample in the month agreed on; **null** when they did not |
+| `days_observed` | distinct dates with a reading, which is **not** the sample count |
+| `samples` | readings behind the row, normally two per day |
+| `is_partial` | `days_observed < days in the calendar month` |
+
+`limit_bytes` is stricter than "the last limit read", and that is what lets the
+tooltip write a cell as "*X* of *Y*". The three statistics are each chosen
+independently — the peak fill and the peak size can be different readings, and
+the medians are interpolated between two — so they describe one reading only
+while a single quota holds all month. While it does, that costs nothing:
+`fill_pct` is then a fixed multiple of `usage_bytes`, and both the maximum and
+the median carry straight through it, so `peak_fill_pct` really is `peak_bytes`
+over that limit. The moment the quota moves, a peak of 90% and a peak size of
+1.5 TB can sit beside a limit of 2 TB and none of the arithmetic works. A null
+is how the figures are told to state the two figures and leave the relation
+between them out.
+
+**`is_partial` means something different here** from the column of the same name
+on `monthly-totals`, where it marks the month the snapshot was taken in. Storage
+readings lag their own collector rather than the snapshot, so the snapshot date
+says nothing about whether a storage month is complete: collection can start
+mid-month, stop mid-month, or drop a day. A mean is deliberately not among the
+statistics — averaging a slowly drifting level is the mean of a random walk, and
+it hides the peak, which the median already covers without doing so.
+
+A snapshot taken before this endpoint was pulled simply has no file for it, and
+every entry point here returns an empty frame rather than raising, so an old
+snapshot loses two figures instead of the whole report.
+
+#### The collector fails silently, and has
+
+This endpoint is the only one here whose freshness is independent of the pull,
+and the failure mode is worth stating because it has actually happened: an
+upgrade of the OpenPortal agents stopped the storage collector without
+surfacing anything. The endpoint went on answering, kept its schema and its
+existing rows, and merely stopped gaining months — so a re-pull returns a table
+byte-identical to the previous one rather than an error, and there is no field
+that separates "the collector is dead" from "there was nothing to report".
+
+Two consequences for anyone reading this code:
+
+- **A stale month is left stale rather than repaired.** The last month the
+  collector touched is frozen in the *month in progress* shape described above —
+  it never gains a `daily_reports` dictionary and its top-level `generated_at`
+  never advances. That is indistinguishable, structurally, from a month that is
+  legitimately still open, which is exactly why `_storage_staleness()` keys off
+  the newest reading's age rather than off the blob's shape.
+- **`openportal-project-usage-reports` is the control.** It is fed by the same
+  agents, so comparing the two separates a broken collector from a broken pull:
+  both stale means suspect the snapshot or the token, usage current and storage
+  stale means the collector, and that distinction is the first thing to
+  establish before raising it with the portal team.
+
 ## The visual report
 
 `waldur_tools.viz` builds the HTML page. `render()` returns a string rather than
@@ -623,6 +725,35 @@ misleads. A change that undoes one of them should be deliberate.
 - **Sequential where the question is magnitude, categorical where it is
   identity.** The heatmap and the per-project totals bar are one hue; only the
   stacked figure and the engagement lines tell series apart.
+- **A bounded fraction is linear and ends in red; an unbounded magnitude is
+  logarithmic and stays one hue.** The quota heatmaps are the exception to the
+  rule above them, and deliberately so: a fill percentage runs from empty to
+  full and the whole decision lives at the top of that range, whereas node hours
+  have no ceiling and span three decades. So the quota figures colour
+  `min(fill_pct, viz.FILL_CEILING)` on a linear 0–100 ramp
+  (`RAMP_FILL_LIGHT`/`RAMP_FILL_DARK`) that leaves the blues around two thirds
+  and finishes through amber into red. Every hex in it still comes from `SERIES`
+  or `CHROME`, so the theme swap needs no new pairs. **The rule applies within a
+  figure, not to it**: the same heatmap's *size* views are `log10` bytes with no
+  ceiling, so its buttons switch the ramp back to the activity blues along with
+  the z values. Leaving them on the quota ramp would paint a large project red
+  for being large.
+- **Ramps are named, not assumed.** A trace carries `meta={"ramp": <name>}` and
+  the repaint looks the name up, because there is now more than one ramp on the
+  page and a repaint that assumed a single one would hand the quota figures the
+  activity blues on every theme switch. A button's own arguments are fixed when
+  the page is written, so they can only carry the *light* form of whichever ramp
+  they select; `fixRamps()` listens for `plotly_restyle` and puts the scale back
+  to what the trace's name and the reader's theme say between them. It keys on
+  the last ramp it applied per trace, so re-asserting one cannot loop.
+- **Where controls would need two dimensions, the row is flattened rather than
+  stacked.** Plotly's button groups do not compose: a second row of buttons
+  issues its own `update` and silently resets the first, so `Scratch` followed
+  by `Median` would land on `Home · median`. The quota figures therefore carry
+  one flat row naming each combination outright. What does not fit in six
+  buttons goes to the tooltip instead — which is why sizes are on every quota
+  cell's hover, and why the per-person figure spends its buttons on the
+  filesystem while the per-project one spends them on absolute size.
 
 ### Supporting series
 
@@ -747,8 +878,14 @@ consistently: month-at-a-time pulls come back duplicate-free and match the
 portal's own dashboard to within rounding. `cache.fetch()` is the single place
 that chooses, so `snapshot` and `report --live` cannot drift apart.
 
-Three guards, because every failure here is silent:
+Four guards, because every failure here is silent:
 
+- **The count might not be there at all.** Every guard below is arithmetic
+  against `X-Result-Count`, so a response without one has no guards — and the
+  shape of that failure is the worst available: `count()` answers `None`, a
+  caller that reads `None` as a zero takes the month for an empty one, and a
+  snapshot of no rows is written with no error anywhere. So an unreadable count
+  is an error in its own right, in `client.py` as in the extension.
 - **The filter might be ignored.** Waldur's DRF filters drop parameters they do
   not recognise (see the warning above), so an endpoint without `year`/`month`
   would be fetched once per month and yield the whole table over and over.
@@ -761,7 +898,63 @@ Three guards, because every failure here is silent:
   `cache.ROW_KEYS` names the columns that identify a row and `cache.check()`
   rejects the pull if any key repeats — on write *and* on read, so an older
   snapshot taken before this fix fails loudly instead of quietly reporting a
-  wildly inflated month.
+  wildly inflated month. The client runs the same test per month, which is what
+  lets it rule on the case below.
+
+### The live month grows while you read it
+
+A month that is still being written to is a *different* fault from unstable
+paging, and it took the opposite answer. `X-Result-Count` is a count taken with
+the first page, while every later page's `OFFSET` resolves against the table as
+it is by then — so a usage row landing mid-crawl lengthens the tail, and the
+pull ends holding **more** rows than the count promised. The guard above read
+that as instability and ended the run, which cost a reader their whole report
+for the portal doing its job.
+
+The checks are therefore ranked rather than run in sequence, in both
+`WaldurClient.iter_list_by_month()` and the extension's `pullMonth`:
+
+| What came back | Ruling |
+| --- | --- |
+| A repeated key | **Fail**, always — where one row came twice another never came at all, and no live month excuses that |
+| Fewer rows than the count | **Fail** — rows arriving during a read cannot explain rows missing from it |
+| More rows, no repeats, a fresh count that agrees | **Keep** — every row in hand is a distinct real row, so the pull holds at least what the opening count described, and a count equal to what is in hand settles that it holds exactly them |
+| More rows, anything else | **Fail** — unresolved |
+
+That last confirmation costs one extra count request, and only when the numbers
+disagree. The whole-table check at the end of the walk is ruled on the same way,
+since a month that legitimately grew would otherwise fail there instead — with
+one difference in what it *means*. A short walk there is not a short pull: every
+month in it has already been checked row by row against its own count, so the
+rows are not missing from the months, there are months missing from the window.
+That is the `months_until`/`monthsUntil` horizon being too narrow, which is a
+fault in this code and not a race, and it is reported without the retry advice
+below.
+
+Every one of those faults is a race, so a month is re-pulled
+`client.MONTH_ATTEMPTS` times before it is reported — one month is a handful of
+requests against a pull that is otherwise done. The extension reports each retry
+through `onRetry`, because a stall on one month otherwise reads as a hang.
+
+### Saying so when the only cure is another run
+
+A race that survives all of that is nobody's mistake, and the one useful thing to
+say about it is "run it again" — which is only advice if it comes with something
+to run. So those failures are marked: `WaldurError(..., transient=True)`, and
+`SnapshotError` alike.
+
+- **The CLI** prints the command back, as it was invoked and with its arguments
+  quoted to be pasted. `cli.main()` does it in one place, and only for the marked
+  failures: telling someone to try again after a rejected token or a dropped
+  filter costs a run and fixes nothing.
+- **The extension** puts a *button* in the error box rather than the word
+  "retry". The refresh control is in the controls bar, which is not where anyone
+  looks after watching the page fail — and after a failure in the first wave it
+  is not on screen at all. The button re-runs the same work rather than reloading,
+  so the cached months stay and only what failed is fetched, and a second failure
+  comes back with the button still there. A marked failure also gets a sentence
+  saying the portal changed under the read, which is the difference between
+  pressing the button and filing a bug.
 
 And one check that does not depend on knowing how the pull works at all:
 [`report reconcile`](#reconcile--from-openportal-allocation-user-usage--invoices)
@@ -889,7 +1082,12 @@ What is deliberately **not** pinned is presentation: `viz.py` and
 differ. What may not differ is any number either of them draws. A third test in
 that file guards the guard, asserting the fixture still exercises a partial
 month, a filtered-out organisation, a project with no usable award rate and a
-blanked association row — a golden file over trivial data proves nothing.
+blanked association row — a golden file over trivial data proves nothing. On the
+storage side it asserts the same of that endpoint's awkward parts: a finished
+month whose last day exists only in the top-level snapshot, a month in progress
+with no `daily_reports` at all, one day reported twice by two collectors, a
+limit that is not a size, a quota raised part-way through a month, and a reading
+dated outside the month its row claims.
 
 The same warning as above applies with more force: none of this opens a browser.
 The parity test covers the arithmetic and nothing else, so a change to the
@@ -906,6 +1104,12 @@ and no amount of checking a spec object catches a title that renders as
 margin deep enough for two bands, and there is a test for that — but the test
 was written after the browser found it, which is the point.
 
+The command-line report inherited the fault rather than the fix, because it
+carries titles in only one place: `viz.py` puts section headings in the HTML
+around each figure, and the two quota heatmaps are the only figures there with
+a title *inside* the plot — and six buttons beside it. They now use the same
+geometry, and `tests/test_viz.py` pins it the same way.
+
 ## Releasing the extension
 
 The extension ships as a zip on a GitHub release, built by
@@ -917,9 +1121,14 @@ git tag web-v0.3.0
 git push origin web-v0.3.0
 ```
 
-The tag is prefixed because this repository has two shippable things on
-separate version lines, and an unprefixed `v0.3.0` would silently claim to be
-this package's release too.
+The tag is prefixed because this repository has two shippable things, and an
+unprefixed `v0.3.0` would silently claim to release the Python package too. The
+prefix says *which artefact*, not which version line: the two are deliberately
+kept at the same number. `web/manifest.json`, the `version` in `pyproject.toml`
+and `waldur_tools.__version__` move together, even when a release only changed
+one side. One number describing the whole repository is easier to hold in your
+head than two that drift, and the cost is an occasional bump that means nothing
+on one of them.
 
 `web/manifest.json` is the only place the extension's version is written down.
 The workflow reads it, refuses a tag that disagrees, and names the asset from

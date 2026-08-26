@@ -260,6 +260,285 @@
       "uuid": "4"
     }
   ],
+  "openportal-project-storage-reports": [
+    {
+      "id": 1,
+      "month": 1,
+      "project_identifier": "abc1.brics",
+      "report": {
+        "daily_reports": {
+          "2025-01-29": {
+            "generated_at": "2025-01-29T10:00:00.000000000Z",
+            "project": "abc1.brics",
+            "project_quotas": {
+              "projects": {
+                "limit": "20.00 TB",
+                "usage": "1.00 TB"
+              }
+            },
+            "user_quotas": {
+              "alice.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "10.00 GB"
+                },
+                "scratch": {
+                  "limit": "4.00 TB",
+                  "usage": "500.00 GB"
+                }
+              },
+              "bob.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "80.00 GB"
+                }
+              }
+            }
+          },
+          "2025-01-30": {
+            "generated_at": "2025-01-30T10:00:00.000000000Z",
+            "project": "abc1.brics",
+            "project_quotas": {
+              "projects": {
+                "limit": "20.00 TB",
+                "usage": "2.00 TB"
+              }
+            },
+            "user_quotas": {
+              "alice.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "20.00 GB"
+                },
+                "scratch": {
+                  "limit": "5.00 TB",
+                  "usage": "600.00 GB"
+                }
+              },
+              "bob.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "90.00 GB"
+                }
+              }
+            }
+          }
+        },
+        "generated_at": "2025-01-31T10:00:00.000000000Z",
+        "project": "abc1.brics",
+        "project_quotas": {
+          "projects": {
+            "limit": "20.00 TB",
+            "usage": "3.00 TB"
+          }
+        },
+        "user_quotas": {
+          "alice.abc1.brics": {
+            "home": {
+              "limit": "100.00 GB",
+              "usage": "30.00 GB"
+            },
+            "scratch": {
+              "limit": "5.00 TB",
+              "usage": "700.00 GB"
+            }
+          },
+          "bob.abc1.brics": {
+            "home": {
+              "limit": "100.00 GB",
+              "usage": "95.00 GB"
+            }
+          }
+        }
+      },
+      "resource": "brics.i3.clusters.macs",
+      "year": 2025
+    },
+    {
+      "id": 2,
+      "month": 1,
+      "project_identifier": "abc1.brics",
+      "report": {
+        "daily_reports": {
+          "2025-01-29": {
+            "generated_at": "2025-01-29T10:15:00.000000000Z",
+            "project": "abc1.brics",
+            "project_quotas": {
+              "projects": {
+                "limit": "20.00 TB",
+                "usage": "1.10 TB"
+              }
+            },
+            "user_quotas": {
+              "alice.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "11.00 GB"
+                },
+                "scratch": {
+                  "limit": "4.00 TB",
+                  "usage": "510.00 GB"
+                }
+              },
+              "bob.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "81.00 GB"
+                }
+              }
+            }
+          },
+          "2025-01-30": {
+            "generated_at": "2025-01-30T10:15:00.000000000Z",
+            "project": "abc1.brics",
+            "project_quotas": {
+              "projects": {
+                "limit": "20.00 TB",
+                "usage": "2.10 TB"
+              }
+            },
+            "user_quotas": {
+              "alice.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "21.00 GB"
+                },
+                "scratch": {
+                  "limit": "5.00 TB",
+                  "usage": "610.00 GB"
+                }
+              },
+              "bob.abc1.brics": {
+                "home": {
+                  "limit": "100.00 GB",
+                  "usage": "91.00 GB"
+                }
+              }
+            }
+          }
+        },
+        "generated_at": "2025-01-31T10:15:00.000000000Z",
+        "project": "abc1.brics",
+        "project_quotas": {
+          "projects": {
+            "limit": "20.00 TB",
+            "usage": "3.10 TB"
+          }
+        },
+        "user_quotas": {
+          "alice.abc1.brics": {
+            "home": {
+              "limit": "100.00 GB",
+              "usage": "31.00 GB"
+            },
+            "scratch": {
+              "limit": "5.00 TB",
+              "usage": "710.00 GB"
+            }
+          },
+          "bob.abc1.brics": {
+            "home": {
+              "limit": "unknown",
+              "usage": "unknown"
+            }
+          }
+        }
+      },
+      "resource": "brics.i3.clusters.shared",
+      "year": 2025
+    },
+    {
+      "id": 3,
+      "month": 2,
+      "project_identifier": "abc1.brics",
+      "report": {
+        "generated_at": "2026-02-18T10:00:00.000000000Z",
+        "project": "abc1.brics",
+        "project_quotas": {
+          "projects": {
+            "limit": "20.00 TB",
+            "usage": "4.00 TB"
+          }
+        },
+        "user_quotas": {
+          "alice.abc1.brics": {
+            "home": {
+              "limit": "100.00 GB",
+              "usage": "40.00 GB"
+            },
+            "scratch": {
+              "limit": "5.00 TB",
+              "usage": "800.00 GB"
+            }
+          },
+          "bob.abc1.brics": {
+            "home": {
+              "limit": "100.00 GB",
+              "usage": "97.00 GB"
+            }
+          }
+        }
+      },
+      "resource": "brics.i3.clusters.macs",
+      "year": 2026
+    },
+    {
+      "id": 4,
+      "month": 1,
+      "project_identifier": "abc2.brics",
+      "report": {
+        "daily_reports": {
+          "2025-02-01": {
+            "generated_at": "2025-02-01T11:00:00.000000000Z",
+            "project": "abc2.brics",
+            "project_quotas": {
+              "projects": {
+                "limit": "20.00 TB",
+                "usage": "9.00 TB"
+              }
+            },
+            "user_quotas": {}
+          }
+        },
+        "generated_at": "2025-01-31T11:00:00.000000000Z",
+        "project": "abc2.brics",
+        "project_quotas": {
+          "projects": {
+            "limit": "unlimited",
+            "usage": "1.00 TB"
+          }
+        },
+        "user_quotas": {}
+      },
+      "resource": "brics.i3.clusters.macs",
+      "year": 2025
+    },
+    {
+      "id": 5,
+      "month": 1,
+      "project_identifier": "zzz9.brics",
+      "report": {
+        "generated_at": "2025-01-31T12:00:00.000000000Z",
+        "project": "zzz9.brics",
+        "project_quotas": {
+          "projects": {
+            "limit": "20.00 TB",
+            "usage": "19.00 TB"
+          }
+        },
+        "user_quotas": {
+          "carol.zzz9.brics": {
+            "home": {
+              "limit": "100.00 GB",
+              "usage": "99.00 GB"
+            }
+          }
+        }
+      },
+      "resource": "brics.i3.clusters.macs",
+      "year": 2025
+    }
+  ],
   "openportal-project-usage-reports": [
     {
       "id": 1,

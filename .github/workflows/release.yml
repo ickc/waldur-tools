@@ -1,8 +1,9 @@
 name: Release the extension
 
-# The repository holds two shippable things on separate version lines -- this
-# package and the browser extension -- so the extension's tags are prefixed.
-# `v*` stays free for the Python package.
+# The repository holds two shippable things -- this package and the browser
+# extension -- so the extension's tags are prefixed and `v*` stays free for the
+# package. The two are kept at the same version number and bumped together, so
+# the prefix says which artefact is being released, not which version line.
 on:
   push:
     tags: ["web-v*"]

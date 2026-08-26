@@ -184,6 +184,22 @@ sameRows('rankedBands', reports.rankedBands(perProject), expected.ranked_bands, 
   'month', 'project_code', 'band',
 ]);
 
+const samples = reports.storageSamples(
+  fixture['openportal-project-storage-reports'],
+  codes,
+);
+
+sameRows('storageCurrent', reports.storageCurrent(samples), expected.storage_current, [
+  'kind', 'project_code', 'username', 'filesystem', 'usage_bytes', 'limit_bytes',
+  'fill_pct', 'date',
+]);
+
+sameRows('storageMonthly', reports.storageMonthly(samples), expected.storage_monthly, [
+  'month', 'kind', 'project_code', 'username', 'filesystem', 'peak_fill_pct',
+  'end_fill_pct', 'median_fill_pct', 'peak_bytes', 'end_bytes', 'median_bytes',
+  'limit_bytes', 'days_observed', 'samples', 'is_partial',
+]);
+
 // -- the orderings that are part of the contract ---------------------------
 //
 // Compared as multisets above, so that a group-by emitting rows in a different
@@ -212,6 +228,14 @@ assert.ok(
     .totalsByProject(perProject)
     .every((row, index, all) => index === 0 || all[index - 1].total <= row.total),
   'totalsByProject must be smallest first — the bar chart draws it bottom up',
+);
+
+checks += 1;
+assert.ok(
+  reports
+    .storageCurrent(samples)
+    .every((row, index, all) => index === 0 || (all[index - 1].fill_pct ?? -1) >= (row.fill_pct ?? -1)),
+  'storageCurrent must be fullest first — the quota table is read top down',
 );
 
 console.log(`  ✓ orderings`);

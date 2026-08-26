@@ -34,10 +34,10 @@ import {
 } from './api.js';
 import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
-  figureTotalsByProject, format,
+  figureStorageProjects, figureStorageUsers, figureTotalsByProject, format,
 } from './figures.js';
 import {
-  PROSE, esc, intro, method, reconcileTable, section, tableView, tile,
+  PROSE, esc, intro, method, reconcileTable, section, storageStaleness, tableView, tile,
 } from './page.js';
 import { currentTheme, preferredTheme, setTheme } from './palette.js';
 import { customerFromPermissions } from './portal.js';
@@ -60,6 +60,7 @@ const state = {
     projects: [],
     invoices: [],
     usageReports: [],
+    storageReports: [],
     /** `users/me/`: the token's own account, for the organisation it belongs to. */
     me: null,
     associations: null,
@@ -133,7 +134,9 @@ function usageRows() {
 
 function render() {
   const { nodes, share, customer } = state.options;
-  const { allocations, summary, customers, projects, invoices, usageReports } = state.raw;
+  const {
+    allocations, summary, customers, projects, invoices, usageReports, storageReports,
+  } = state.raw;
   const scope = reports.inScope(allocations);
   const rows = reports.monthlyRows(usageRows(), scope, customer);
   if (!rows.length) {
@@ -164,6 +167,21 @@ function render() {
   const monthlyShare = totals[totals.length - 1].entitlement_node_hours || 1;
   const unallocatedMonths = unallocated / monthlyShare;
   const queue = reports.queueMonthly(usageReports, codes);
+
+  // Scoped off the allocations rather than off the usage, and narrowed to the
+  // selected organisation. The storage endpoint reports every project on the
+  // machine, so an unscoped figure would put other organisations' disks on our
+  // page; taking the codes from `perProject` instead would drop any project
+  // that has never run a job, and a project with no compute is exactly the one
+  // whose disk fills up unnoticed.
+  const storageSamples = reports.storageSamples(
+    storageReports,
+    reports.scopedCodes(scope, customer),
+  );
+  const storageByMonth = reports.storageMonthly(storageSamples);
+  const storageNow = reports.storageCurrent(storageSamples);
+  const projectQuota = figureStorageProjects(storageByMonth);
+  const userQuota = figureStorageUsers(storageByMonth);
 
   const awardedPct = latest
     ? (100 * awarded[months.indexOf(latest.month)]) / latest.entitlement_node_hours
@@ -268,6 +286,8 @@ function render() {
   ensureSection('heatmap', 'Which projects are alive');
   ensureSection('totals', 'How concentrated we are');
   ensureSection('engagement', 'Are more people using it?');
+  if (projectQuota !== null) ensureSection('storage-projects', 'How full the project disks are');
+  if (userQuota !== null) ensureSection('storage-users', "How full people's own disks are");
   if (queue.length) ensureSection('queue', 'Demand, and what it cost to wait');
 
   draw('share', figureShare(totals, nodes, share, awarded));
@@ -300,6 +320,37 @@ function render() {
   draw('totals', figureTotalsByProject(reports.totalsByProject(perProject)));
   draw('engagement', figureEngagement(totals, existing));
 
+  // The one thing about these two figures that the columns cannot say: the
+  // collector behind them can stop without the endpoint saying so, and then
+  // the heatmap simply ends rather than looking wrong.
+  const stale = storageStaleness(storageNow);
+  if (projectQuota !== null) {
+    note('storage-projects', stale);
+    draw('storage-projects', projectQuota);
+    table('storage-projects', storageNow.filter((row) => row.kind === 'project'), [
+      ['project_code', 'Project'],
+      ['filesystem', 'Filesystem'],
+      ['usage_bytes', 'Used', 'size'],
+      ['limit_bytes', 'Quota', 'size'],
+      ['fill_pct', '% full', 'number'],
+      ['date', 'Last read'],
+    ]);
+  }
+
+  if (userQuota !== null) {
+    note('storage-users', stale);
+    draw('storage-users', userQuota);
+    table('storage-users', storageNow.filter((row) => row.kind === 'user'), [
+      ['username', 'User'],
+      ['project_code', 'Project'],
+      ['filesystem', 'Filesystem'],
+      ['usage_bytes', 'Used', 'size'],
+      ['limit_bytes', 'Quota', 'size'],
+      ['fill_pct', '% full', 'number'],
+      ['date', 'Last read'],
+    ]);
+  }
+
   if (queue.length) {
     draw('queue', figureQueue(queue));
     table('queue', queue, [
@@ -326,6 +377,11 @@ function draw(id, figure) {
 
 function table(id, rows, columns) {
   el(`table-${id}`).innerHTML = tableView(rows, columns);
+}
+
+/** The warning slot under a section's prose. Trusted markup, empty when silent. */
+function note(id, html) {
+  el(`note-${id}`).innerHTML = html;
 }
 
 /**
@@ -360,10 +416,50 @@ function renderReconcile(rows, invoices, customer) {
       `month">usage reconciles with ${checked.length} months of invoices</span>`;
 }
 
-function showError(heading, error) {
+/**
+ * What the reader is told about a failure, and what they can press about it.
+ *
+ * A message ending in "retry" is only advice if there is something to retry
+ * with. The refresh button lives in the controls bar, which is not where anyone
+ * is looking after watching the page fail -- and after a failure in the first
+ * wave it is not on screen at all. So the action goes in the error itself, and
+ * `retry` is the thing to run again: the same work, not a reload, so the cached
+ * months are still there and only what failed is fetched.
+ */
+function showError(heading, error, { retry = null, label = 'Try again' } = {}) {
+  const hint = error.transient ? `<p class="hint">${esc(TRANSIENT_HINT)}</p>` : '';
   el('errors').innerHTML =
-    `<div class="error"><h2>${esc(heading)}</h2><p>${esc(error.message)}</p></div>`;
+    `<div class="error"><h2>${esc(heading)}</h2><p>${esc(error.message)}</p>${hint}</div>`;
+  if (!retry) return;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'primary';
+  button.textContent = label;
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    button.textContent = 'Trying again…';
+    try {
+      await retry();
+      clearError();
+    } catch (again) {
+      // Straight back to the same box, button and all: a second failure must
+      // not be the one that leaves the reader with nothing to press.
+      showError(heading, again, { retry, label });
+    }
+  });
+  el('errors').querySelector('.error').append(button);
 }
+
+/**
+ * Said whenever a failure carries `transient`, because "the portal changed
+ * under us" is not a thing a reader can be expected to infer from a row count,
+ * and it is the difference between pressing the button and filing a bug.
+ */
+const TRANSIENT_HINT =
+  'This is the portal being written to while it was read — a live database doing its job, '
+  + 'not a fault in the report or in what is cached here. Every month was already fetched '
+  + 'several times over before this gave up, so trying again usually clears it.';
 
 function clearError() {
   el('errors').innerHTML = '';
@@ -430,6 +526,16 @@ async function run({ refresh = false } = {}) {
       progress(`Reading monthly usage — ${done} of ${of} months, ${format(rows, 0)} rows`,
         done, of);
     },
+    // A month is re-pulled when it comes back inconsistent, which is nearly
+    // always the live month growing under the read. Said out loud because it is
+    // the only reason a pull stalls on one month, and silence there reads as a
+    // hang; the console line is what a bug report needs.
+    onRetry: ({ year, month, attempt, of, detail }) => {
+      console.warn(`Retrying ${year}-${String(month).padStart(2, '0')} (${attempt}/${of}):`,
+        detail);
+      progress(`Re-reading ${reports.monthKey(year, month)} — the portal changed it mid-read `
+        + `(attempt ${attempt} of ${of})`);
+    },
   });
 
   state.loading = false;
@@ -439,16 +545,20 @@ async function run({ refresh = false } = {}) {
 
   // The tail: neither figure below blocks anything above it, and the page is
   // already complete and readable without them.
-  loadExtras().catch((error) => showError('Could not load the supporting figures', error));
+  loadExtras().catch((error) => showError('Could not load the supporting figures', error, {
+    retry: () => loadExtras(),
+    label: 'Load them again',
+  }));
 }
 
 /**
- * The two endpoints nothing on the critical path needs.
+ * The endpoints nothing on the critical path needs.
  *
  * `openportal-project-usage-reports` carries a fat per-day blob and backs one
- * figure; `openportal-associations` is thousands of rows across the whole
- * machine and backs one denominator on one tile. Both are worth having and
- * neither is worth waiting for.
+ * figure; `openportal-project-storage-reports` carries another and backs the
+ * two quota figures; `openportal-associations` is thousands of rows across the
+ * whole machine and backs one denominator on one tile. All are worth having and
+ * none is worth waiting for.
  *
  * Associations is pulled with a duplicate check, because measured against the
  * live deployment it is *also* not totally ordered: the row count matches every
@@ -461,6 +571,8 @@ async function run({ refresh = false } = {}) {
  */
 async function loadExtras() {
   state.raw.usageReports = await state.client.list('openportal-project-usage-reports');
+  scheduleRender();
+  state.raw.storageReports = await state.client.list('openportal-project-storage-reports');
   scheduleRender();
   state.raw.associations = await state.client.list('openportal-associations', {
     rowKeys: ['uuid'],
@@ -706,11 +818,18 @@ async function build({ token, apiUrl, fromPortal }) {
     // anything can throw. What decides this is whether the reader has something
     // to read -- a failure in the first wave leaves an empty page whose only
     // useful control, the token box, is on the gate.
-    if (!state.headRendered) showGate(error.message);
-    else {
+    if (!state.headRendered) {
+      // The gate's own button is the retry here, so all it needs is the reason
+      // to press it rather than to go looking for what went wrong.
+      showGate(error.transient ? `${error.message} ${TRANSIENT_HINT}` : error.message);
+    } else {
       showError(
         error instanceof WaldurError ? 'The portal pull did not complete' : 'Something broke',
         error,
+        // Not `refresh: true`: the complete months already cached are not what
+        // failed, and re-fetching a year of them to get at one bad month would
+        // turn a button press into another minute of waiting.
+        { retry: () => run() },
       );
     }
   } finally {
@@ -809,7 +928,7 @@ el('refresh').addEventListener('click', async () => {
   try {
     await run({ refresh: true });
   } catch (error) {
-    showError('Refresh failed', error);
+    showError('Refresh failed', error, { retry: () => run({ refresh: true }) });
   }
 });
 

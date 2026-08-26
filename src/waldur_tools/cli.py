@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -16,7 +18,14 @@ from . import viz as viz_report
 from .cache import DEFAULT_ENDPOINTS, Snapshot, SnapshotError, available, pull
 from .client import WaldurClient, WaldurError
 from .config import MissingTokenError, Settings
-from .reports import DEFAULT_CUSTOMER, DEFAULT_SHARE, REPORTS, SCOPED, TOTAL_NODES
+from .reports import (
+    DEFAULT_CUSTOMER,
+    DEFAULT_SHARE,
+    REPORTS,
+    SCOPED,
+    TOTAL_NODES,
+    humanise_bytes,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -38,8 +47,16 @@ def _render(frame: pl.DataFrame, title: str, limit: int) -> None:
     for column in shown.columns:
         numeric_column = shown.schema[column].is_numeric()
         table.add_column(column, justify="right" if numeric_column else "left")
+    # Per column, because a byte count is unreadable at full precision and the
+    # frame itself stays numeric so --sort and -o export keep working on it.
+    formatters = [_size if column.endswith("_bytes") else _fmt for column in shown.columns]
     for row in shown.iter_rows():
-        table.add_row(*("" if value is None else _fmt(value) for value in row))
+        table.add_row(
+            *(
+                "" if value is None else render(value)
+                for value, render in zip(row, formatters, strict=True)
+            )
+        )
     console.print(table)
     if shown.height < frame.height:
         console.print(
@@ -63,6 +80,15 @@ def _fmt(value: object) -> str:
     if isinstance(value, float):
         return f"{value:,.2f}"
     return str(value)
+
+
+def _size(value: object) -> str:
+    """A byte count as a size, for display only.
+
+    The frame keeps the raw number, so ``--sort`` and ``-o`` still see bytes
+    rather than a string that sorts alphabetically.
+    """
+    return humanise_bytes(value) if isinstance(value, int | float) else str(value)
 
 
 def _write(frame: pl.DataFrame, output: Path) -> None:
@@ -310,7 +336,7 @@ def whoami() -> None:
     settings = Settings.from_env()
     console.print(repr(settings))
     with WaldurClient(settings) as client:
-        me = client.http.get(f"{settings.api_url}/api/users/me/").json()
+        me = client.me()
     console.print(
         f"[green]Authenticated as[/] {me.get('username')} ({me.get('full_name') or 'no name'})"
     )
@@ -321,11 +347,27 @@ def main() -> None:
 
     A missing token, an absent snapshot and a rejected request are all things
     the user can fix; a traceback for any of them is noise.
+
+    One class of failure is not the user's to fix at all: the portal is a live
+    database, and a table written to while it is read can defeat the paging
+    guards however carefully they are written. Those carry ``transient``, and
+    are worth more than a message -- the run has already re-pulled each month
+    several times, so what is left really is to run the whole thing again, and
+    the command comes back with the advice rather than leaving it to be
+    reconstructed from scrollback.
     """
     try:
         app()
     except (MissingTokenError, SnapshotError, WaldurError) as error:
         error_console.print(f"[red]{error}[/]")
+        if getattr(error, "transient", False):
+            command = shlex.join([Path(sys.argv[0]).name, *sys.argv[1:]])
+            error_console.print(
+                "\n[yellow]Nothing is wrong with the command or with what is already "
+                "cached: the portal was being written to while it was read, and every "
+                "month was re-pulled several times before giving up. Run it again:[/]\n"
+            )
+            error_console.print(f"  [bold]{command}[/]")
         raise SystemExit(2) from error
 
 

@@ -20,10 +20,10 @@ import { describe, it } from 'node:test';
 
 import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
-  figureTotalsByProject,
+  figureStorageProjects, figureStorageUsers, figureTotalsByProject,
 } from '../src/figures.js';
-import { reconcileTable } from '../src/page.js';
-import { CHROME, SERIES } from '../src/palette.js';
+import { STALE_DAYS, reconcileTable, storageStaleness } from '../src/page.js';
+import { CHROME, RAMP_FILL_LIGHT, RAMP_LIGHT, SERIES } from '../src/palette.js';
 import * as reports from '../src/reports.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,7 +60,16 @@ const every = () => [
     fixture['openportal-project-usage-reports'],
     scope.map((row) => row.project_code),
   ))],
+  ['storage-projects', figureStorageProjects(storageByMonth)],
+  ['storage-users', figureStorageUsers(storageByMonth)],
 ];
+
+const storageByMonth = reports.storageMonthly(
+  reports.storageSamples(
+    fixture['openportal-project-storage-reports'],
+    scope.map((row) => row.project_code),
+  ),
+);
 
 /** Every colour the palette knows, in its light step. */
 const PALETTE = new Set([
@@ -233,6 +242,202 @@ describe('the heatmap', () => {
 describe('the demand figure', () => {
   it('is absent rather than empty when the portal has no usage reports', () => {
     assert.equal(figureQueue([]), null);
+  });
+});
+
+describe('the quota heatmaps', () => {
+  it('colours a bounded fraction on a linear scale, not a log one', () => {
+    // The departure from the node-hour heatmap, and the reason the figure is
+    // readable: a fill percentage runs 0 to 100 and the whole decision lives
+    // at the top of that range. A log ramp would put half-full and nearly-full
+    // a few pixels apart.
+    const figure = figureStorageProjects(storageByMonth);
+    assert.equal(figure.data[0].zmin, 0);
+    assert.equal(figure.data[0].zmax, 100);
+    assert.deepEqual(figure.data[0].colorbar.ticktext, ['0', '25%', '50%', '75%', '100%']);
+  });
+
+  it('carries its own ramp, so a repaint cannot hand it the activity blues', () => {
+    assert.equal(figureStorageProjects(storageByMonth).data[0].meta.ramp, 'fill');
+    assert.equal(figureStorageUsers(storageByMonth).data[0].meta.ramp, 'fill');
+  });
+
+  it('leaves the quota ramp behind on the size views', () => {
+    // A bounded fraction is linear and ends in red; an unbounded magnitude is
+    // logarithmic and stays one hue. The size views are log10 bytes with no
+    // ceiling, so the quota ramp would paint a large project red for being
+    // large -- the opposite of what that colour means on every other view of
+    // the same figure. Switched by name as well as by value, so that a theme
+    // repaint, which reads the name, keeps it.
+    const figure = figureStorageProjects(storageByMonth);
+    const buttons = new Map(
+      figure.layout.updatemenus[0].buttons.map((button) => [button.label, button.args[0]]),
+    );
+    for (const label of ['Peak', 'End', 'Median']) {
+      assert.equal(buttons.get(label)['meta.ramp'], 'fill');
+      assert.equal(buttons.get(label).colorscale[0].at(-1)[1], RAMP_FILL_LIGHT.at(-1));
+    }
+    for (const label of ['Peak size', 'End size', 'Median size']) {
+      assert.equal(buttons.get(label)['meta.ramp'], 'activity');
+      assert.equal(buttons.get(label).colorscale[0].at(-1)[1], RAMP_LIGHT.at(-1));
+    }
+  });
+
+  it('marks a month that was not observed on every day', () => {
+    // Both fixture months are short, and a column standing on one reading is
+    // not comparable with one standing on thirty.
+    const figure = figureStorageProjects(storageByMonth);
+    assert.ok(figure.data[0].x.every((label) => label.endsWith('*')));
+  });
+
+  it('orders rows so the fullest quota is at the top', () => {
+    // Plotly draws the first row at the bottom, so ascending peak puts the
+    // person about to run out where the eye lands.
+    const figure = figureStorageUsers(storageByMonth);
+    const peaks = figure.data[0].y.map((key) => {
+      const rows = storageByMonth.filter(
+        (row) => `${row.username} · ${row.project_code}` === key,
+      );
+      return Math.max(...rows.map((row) => row.peak_fill_pct ?? -1));
+    });
+    assert.deepEqual(peaks, [...peaks].sort((a, b) => a - b));
+  });
+
+  it('spends its buttons on the filesystem for people and on size for projects', () => {
+    // Flat rather than two groups, because plotly's groups do not compose.
+    const projects = figureStorageProjects(storageByMonth);
+    assert.deepEqual(
+      projects.layout.updatemenus[0].buttons.map((button) => button.label),
+      ['Peak', 'End', 'Median', 'Peak size', 'End size', 'Median size'],
+    );
+    const users = figureStorageUsers(storageByMonth);
+    assert.deepEqual(
+      users.layout.updatemenus[0].buttons.map((button) => button.label),
+      ['Home peak', 'Home end', 'Home median', 'Scratch peak', 'Scratch end', 'Scratch median'],
+    );
+  });
+
+  it('puts the size on every tooltip, since no button carries it for people', () => {
+    const figure = figureStorageUsers(storageByMonth);
+    const hovers = figure.data[0].text.flat().filter((text) => text !== 'no reading');
+    assert.ok(hovers.length);
+    assert.ok(hovers.every((text) => /\d GB|\d TB|\d MB|\d KB/.test(text)));
+    assert.ok(hovers.every((text) => text.includes('days')));
+  });
+
+  it('only says "of" when one quota held all month', () => {
+    // "X of Y" is arithmetic, and it is not written where it does not hold.
+    // Alice's scratch quota is raised mid-January, so the month's percentage
+    // and its size are taken against different limits and the sentence
+    // relating them would be false. Both figures survive; the relation comes
+    // off. Her home quota does hold all month, and still says what it was.
+    const figure = figureStorageUsers(storageByMonth);
+    const row = figure.data[0].y.findIndex((label) => label.startsWith('alice'));
+    assert.ok(row >= 0);
+    const hoversFor = (label) => {
+      const button = figure.layout.updatemenus[0].buttons.find((b) => b.label === label);
+      return button.args[0].text[0][row].filter((text) => text !== 'no reading');
+    };
+    const [scratch] = hoversFor('Scratch median');
+    assert.match(scratch, /% full/);
+    assert.match(scratch, /quota not the same on every reading/);
+    // "3 of 31 days read" is the evidence clause and belongs there; what must
+    // not appear is a size written as a fraction of a quota.
+    assert.ok(!scratch.split(' · ')[0].includes(' of '));
+    const home = hoversFor('Home median');
+    assert.ok(home.length && home.every((text) => text.includes(' of 100.00 GB')));
+  });
+
+  it('leaves a quota with no reading blank, not at zero', () => {
+    // One fixture user holds a home quota and no scratch one, so the blank
+    // appears when the buttons switch filesystem rather than on the default
+    // view. Drawing it as zero would claim an empty disk, not an absent one.
+    const figure = figureStorageUsers(storageByMonth);
+    const scratch = figure.layout.updatemenus[0].buttons.find(
+      (button) => button.label === 'Scratch peak',
+    );
+    const [{ z, text }] = scratch.args;
+    assert.ok(z[0].flat().includes(null));
+    assert.ok(text[0].flat().includes('no reading'));
+  });
+
+  it('is absent rather than empty when the portal reports no quotas', () => {
+    assert.equal(figureStorageProjects([]), null);
+    assert.equal(figureStorageUsers([]), null);
+  });
+});
+
+describe('sizes written back out', () => {
+  it('reaches petabytes rather than stopping at four figures of terabytes', () => {
+    // The unit the parser accepts is the unit the renderer has to reach. A
+    // project quota measured in petabytes is not hypothetical on a machine
+    // this size, and "1,024.00 TB" is precisely the noise this exists to avoid.
+    assert.equal(reports.humaniseBytes(1024 ** 5), '1.00 PB');
+    assert.equal(reports.humaniseBytes(2.5 * 1024 ** 5), '2.50 PB');
+  });
+});
+
+describe('the projects a quota figure covers', () => {
+  const administered = [
+    { project_code: 'abc1', customer_name: 'UKRI' },
+    { project_code: 'abc2', customer_name: 'UKRI' },
+    { project_code: 'zzz9', customer_name: 'Other Uni' },
+  ];
+
+  it('keeps a project that has never run a job', () => {
+    // The bug this replaced took the codes off the monthly usage, so a project
+    // with no compute vanished from the disk figures -- and a project with no
+    // compute is exactly the one whose disk fills up with nobody watching.
+    // Nothing here has a usage row at all.
+    assert.deepEqual(reports.scopedCodes(administered, 'UKRI'), ['abc1', 'abc2']);
+  });
+
+  it('drops the organisations the report is not about', () => {
+    assert.ok(!reports.scopedCodes(administered, 'UKRI').includes('zzz9'));
+  });
+
+  it('keeps every project the token administers when no organisation is chosen', () => {
+    assert.deepEqual(reports.scopedCodes(administered, null), ['abc1', 'abc2', 'zzz9']);
+  });
+});
+
+describe('the staleness warning on the quota figures', () => {
+  // This endpoint is documented as answering, unchanged and without an error,
+  // after its collector has silently stopped. The heatmap's columns just end,
+  // and the date is otherwise only inside a collapsed table -- so if the page
+  // does not say it in words, nothing does.
+  const readings = (day) => [{ date: day }, { date: '2020-01-01' }];
+  const on = (iso) => new Date(`${iso}T12:00:00Z`);
+
+  it('says nothing while the collector is keeping up', () => {
+    assert.equal(storageStaleness(readings('2026-03-01'), on('2026-03-02')), '');
+  });
+
+  it('stays quiet right up to the threshold and speaks the day after', () => {
+    // A collector between runs must not be accused of being dead.
+    const day = new Date(Date.UTC(2026, 2, 1) + (STALE_DAYS - 1) * 86400000);
+    assert.equal(storageStaleness(readings('2026-03-01'), day), '');
+    const next = new Date(Date.UTC(2026, 2, 1) + STALE_DAYS * 86400000);
+    assert.ok(storageStaleness(readings('2026-03-01'), next).length);
+  });
+
+  it('gives the date it stopped and how long ago that was', () => {
+    const warning = storageStaleness(readings('2026-03-01'), on('2026-06-01'));
+    assert.ok(warning.includes('1 March 2026'));
+    assert.match(warning, /92 days/);
+    assert.ok(warning.includes('<strong>'));
+  });
+
+  it('reads the newest reading, not the first row it is handed', () => {
+    // `storageCurrent` is sorted by how full each quota is, so the freshest
+    // date is in no particular position. Taking the first row would call a
+    // current report months out of date on the strength of one dead quota.
+    const scrambled = [{ date: '2020-01-01' }, { date: '2026-03-01' }, { date: '2019-06-30' }];
+    assert.equal(storageStaleness(scrambled, on('2026-03-02')), '');
+  });
+
+  it('says nothing at all when there are no readings', () => {
+    assert.equal(storageStaleness([], on('2026-06-01')), '');
   });
 });
 

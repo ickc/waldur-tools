@@ -8,7 +8,7 @@
  */
 
 import { format } from './figures.js';
-import { monthLabel, monthLabelLong } from './reports.js';
+import { humaniseBytes, monthLabel, monthLabelLong } from './reports.js';
 
 export function esc(value) {
   return String(value ?? '')
@@ -17,6 +17,47 @@ export function esc(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+/**
+ * How old the newest quota reading may be before the figures say so in words.
+ *
+ * Long enough that a collector between runs is not accused of being dead, short
+ * enough that a page is never quietly a season out of date. `viz.STALE_DAYS`
+ * carries the same number.
+ */
+export const STALE_DAYS = 45;
+
+/**
+ * A warning sentence when the quota readings are old, and nothing when they are not.
+ *
+ * The storage figures lag their own collector rather than the pull, so a report
+ * refreshed this morning can be showing a disk as it stood months ago -- and
+ * this endpoint is documented as continuing to answer, unchanged and without an
+ * error, after its collector has silently stopped. That is invisible on the
+ * heatmap, whose columns simply stop, and the date is otherwise only inside a
+ * collapsed table, which makes it the one thing about these figures worth
+ * saying in words. Ported from `viz._storage_staleness`.
+ */
+export function storageStaleness(current, today = new Date()) {
+  let newest = '';
+  for (const row of current) if (row.date > newest) newest = row.date;
+  if (!newest) return '';
+  const read = Date.parse(`${newest}T00:00:00Z`);
+  if (Number.isNaN(read)) return '';
+  // Both sides at UTC midnight on their own calendar day, so the answer is a
+  // whole number of days rather than a fraction of the reader's timezone.
+  const now = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  const days = Math.floor((now - read) / 86400000);
+  if (days < STALE_DAYS) return '';
+  const when = new Date(read).toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+  });
+  return (
+    `<strong>These readings stop on ${esc(when)}</strong>, ${days} days before this ` +
+    'report was drawn: the collector behind them has not reported since. Read the ' +
+    'columns as history rather than as the state of the disks now.'
+  );
 }
 
 /**
@@ -39,6 +80,10 @@ export function tableView(rows, columns) {
           if (value === null || value === undefined) return '<td></td>';
           if (kind === 'month') return `<td>${esc(monthLabel(value))}</td>`;
           if (kind === 'number') return `<td>${format(Number(value), 1)}</td>`;
+          // Bytes are humanised here rather than upstream, so the row keeps a
+          // number: a quota in bytes is fourteen digits of noise at one
+          // decimal place, and a string would sort alphabetically.
+          if (kind === 'size') return `<td>${esc(humaniseBytes(Number(value)))}</td>`;
           return `<td>${esc(value)}</td>`;
         })
         .join('');
@@ -132,6 +177,10 @@ export function tile(label, value, note, hero = false) {
 export function section(id, heading, prose) {
   return (
     `<section class="fig" id="fig-${esc(id)}"><h2>${esc(heading)}</h2><p>${prose}</p>` +
+    // Empty on a healthy report, and collapsed by CSS when it is. Separate
+    // from the prose above because it is redrawn on every refresh, while
+    // `ensureSection` writes the prose once and never again.
+    `<div class="stale" id="note-${esc(id)}"></div>` +
     `<div class="plot" id="plot-${esc(id)}"></div>` +
     `<div id="table-${esc(id)}"></div></section>`
   );
@@ -166,6 +215,25 @@ export const PROSE = {
     'Three counts on one axis. The gap between projects set up and projects that ran ' +
     'something is the onboarding gap; the people line is whether usage rests on more than ' +
     'a handful of individuals.',
+  'storage-projects':
+    'Node hours are a flow; disk is a level, so a month has to be summarised by picking a ' +
+    'statistic rather than by adding one up. <em>Peak</em> is the fullest it got &mdash; ' +
+    'the reading that decides whether writes failed, and the default. <em>End</em> is the ' +
+    'level carried into the next month, and <em>median</em> is the typical level, unmoved ' +
+    "by a single day's spike. Colour is the percentage of the quota rather than the size, " +
+    'because a quota can be raised for one project and not another: full is 100% of ' +
+    'whatever that row was granted, and it is the same colour everywhere on the grid, ' +
+    'where a terabyte count means a different thing on every row. On a size ramp the ' +
+    'project given the most room would be drawn as the one in the most trouble. The ' +
+    '<em>size</em> views and every tooltip give the bytes. A month marked ' +
+    '<code>*</code> was not observed on every day.',
+  'storage-users':
+    'The same reading, per person. Home is a hundredth the size of scratch, so the two are ' +
+    'never comparable as sizes and the colour stays a percentage of whichever quota the ' +
+    'buttons select. Home is where this bites: it is small, it is where people put things ' +
+    'they meant to keep, and a full one stops a job as surely as a full scratch does. Rows ' +
+    'are ordered by the fullest that quota ever got, so the people worth an email are at ' +
+    'the top.',
   queue:
     'Utilisation that is low <em>and</em> quick to schedule is a demand problem; low ' +
     'utilisation with long waits is a job-shape or scheduling problem. This is as far as ' +

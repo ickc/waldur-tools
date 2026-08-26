@@ -111,7 +111,7 @@ in `report.js`, and the `chrome.permissions` request beside it.
 
 ## What it does and does not carry
 
-Six figures, against the eight `waldur-tools viz` produces.
+Eight figures, against the ten `waldur-tools viz` produces.
 
 | Figure | Here | Why |
 | --- | --- | --- |
@@ -121,6 +121,8 @@ Six figures, against the eight `waldur-tools viz` produces.
 | Total per project | ✅ | |
 | Engagement | ✅ | |
 | Demand: jobs and queue wait | ✅ | from `openportal-project-usage-reports` |
+| Project quota heatmap | ✅ | from `openportal-project-storage-reports`, scoped off the allocations |
+| Personal quota heatmap | ✅ | the same endpoint, `home` and `scratch` |
 | Job-size distribution | ❌ | needs `sacct` |
 | Queue wait by what was requested | ❌ | needs `sacct` |
 | Spread of waits per month | ❌ | needs `sacct` |
@@ -129,6 +131,15 @@ The three missing ones read a SLURM capture. The portal has **no per-job view** 
 its usage reports stop at daily totals — so what a job asked the scheduler for
 exists only on the cluster, and a browser on a laptop cannot get to a login node.
 That is a limit of the data, not of this port.
+
+The two quota figures take their project codes from the **allocations** filtered
+by the selected organisation, not from the usage rows the other figures are
+built on. A project that has never run a job has no usage row, and that is
+precisely the project whose disk fills up unnoticed. They also carry the same
+staleness warning the command-line report does: this endpoint goes on answering
+after its collector has silently stopped, so a reading older than
+`page.STALE_DAYS` is called out in words above the figure rather than left to be
+found inside the table.
 
 One thing it adds: the **invoice cross-check runs on the page**. `waldur-tools`
 asks you to run `report reconcile` before quoting anything out of the visual
@@ -154,8 +165,9 @@ is about a hundred rows. So the page is built in three waves:
    so the round trips overlap. Every month that lands redraws the figures, at
    most once every 300ms.
 3. **The tail in the background** — the daily usage reports behind the demand
-   figure, and the associations behind the "people with access" denominator.
-   Neither blocks anything above it.
+   figure, the storage reports behind the two quota figures, and the
+   associations behind the "people with access" denominator. None of them blocks
+   anything above it.
 
 Complete months are then kept in IndexedDB. A calendar month that has ended is
 not written to again, so a cached copy stays correct indefinitely; the month in
@@ -224,11 +236,21 @@ hours well past the true figure and read as a finding until it was checked.
   omissions cancel out in a count;
 - the months summing to the unfiltered total for the table as a whole;
 - and `X-Result-Count` being *readable at all*. Every guard above is arithmetic
-  against that header, and it crosses an origin only while the deployment names
-  it in `access-control-expose-headers`. Were it to stop doing so, `count()`
-  would answer null, null would read as an empty month, and the report would
-  draw itself out of no rows without an error anywhere. So a missing header is
-  an error in its own right.
+  against that header, so a missing one is an error in its own right on both
+  sides. It is the browser that can really lose it: the header crosses an origin
+  only while the deployment names it in `access-control-expose-headers`, and were
+  it to stop doing so, `count()` would answer null, null would read as an empty
+  month, and the report would draw itself out of no rows without an error
+  anywhere.
+
+The count check has one exception, and it is the live month. `X-Result-Count` is
+taken with the first page while later pages resolve their `OFFSET` against the
+table as it is by then, so a usage row landing mid-crawl leaves the pull holding
+*more* rows than the count promised — the portal working, not failing. A pull
+that is over-long, repeats no key, and matches a fresh count is kept; a repeat
+or a short pull still fails outright. Every one of those is a race, so a month
+is re-pulled `MONTH_ATTEMPTS` times before it is reported, and `onRetry` says so
+in the progress line. See DEVELOPER.md for the full ruling.
 
 The last of those doubles as the cache's staleness check: if the portal backfills
 an old month, the totals stop agreeing, the cache is dropped and the pull runs

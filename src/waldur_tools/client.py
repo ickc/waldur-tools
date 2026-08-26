@@ -25,7 +25,8 @@ end to end silently returns some rows twice and drops others --
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Sequence
 from datetime import date
 from types import TracebackType
 from typing import Any, cast
@@ -45,6 +46,36 @@ DEFAULT_PAGE_SIZE = 200
 #: slack costs twelve cheap count requests and covers a backfill.
 EARLIEST_MONTH = (2024, 1)
 
+#: How many times a month is pulled before its inconsistency is reported. Every
+#: fault the guards below catch is a race against a table being written to, and
+#: a race is worth losing twice before it is worth failing a pull for: one month
+#: is a handful of requests, where a report is the whole run.
+MONTH_ATTEMPTS = 3
+
+#: Waited after a failed attempt, multiplied by the attempt number.
+RETRY_BACKOFF_SECONDS = 0.3
+
+
+def _repeats(rows: Sequence[JsonDict], keys: Sequence[str]) -> int:
+    """Rows repeating a key already seen in ``rows``.
+
+    Duplicates and omissions cancel out in a row *count*, so this is the only
+    thing that sees an unstable page. ``cache.check`` runs the same test over
+    the finished frame; this one runs per month, because whether a month may be
+    kept turns on it -- see :meth:`WaldurClient.iter_list_by_month`.
+    """
+    if not keys:
+        return 0
+    seen: set[tuple[Any, ...]] = set()
+    repeats = 0
+    for row in rows:
+        key = tuple(row.get(field) for field in keys)
+        if key in seen:
+            repeats += 1
+        else:
+            seen.add(key)
+    return repeats
+
 
 def months_until(today: date, start: tuple[int, int] = EARLIEST_MONTH) -> Iterator[tuple[int, int]]:
     """Every ``(year, month)`` from ``start`` to the month containing ``today``."""
@@ -55,7 +86,41 @@ def months_until(today: date, start: tuple[int, int] = EARLIEST_MONTH) -> Iterat
 
 
 class WaldurError(RuntimeError):
-    """An API call failed."""
+    """An API call failed.
+
+    ``transient`` marks the ones whose only cure is to run the command again:
+    the portal being written to while it is read. Everything the guards below
+    can catch has already been re-pulled :const:`MONTH_ATTEMPTS` times by the
+    time it is raised, so the flag means "and it still did not settle", not
+    "this has not been tried". The CLI prints the command back for those and
+    nothing extra for the rest -- telling someone to try again after a rejected
+    token or a dropped filter only wastes another run.
+    """
+
+    transient = False
+
+    def __init__(self, *args: object, transient: bool = False) -> None:
+        super().__init__(*args)
+        self.transient = transient
+
+
+def _missing_count_header(endpoint: str) -> WaldurError:
+    """Said when ``X-Result-Count`` is absent, because silence is the worst answer.
+
+    Every guard on a by-month pull is arithmetic against that header, so a pull
+    that cannot read it has no guards at all -- and the shape of that failure is
+    the worst one available: :meth:`WaldurClient.count` answers ``None``, a
+    caller that reads ``None`` as a zero takes the month for an empty one, and
+    the snapshot is written holding no rows and no error. Nothing downstream can
+    tell that table from a quiet month. So it is checked for, and said out loud.
+
+    Not ``transient``: a header that is not being sent will not be sent on the
+    next run either, and the fix is at the deployment rather than here.
+    """
+    return WaldurError(
+        f"{endpoint} returned no readable X-Result-Count header, so none of the paging "
+        "guards can run and no total built from it can be trusted."
+    )
 
 
 class WaldurClient:
@@ -106,15 +171,38 @@ class WaldurClient:
         payload: dict[str, str] = self._get(f"{self.settings.api_url}/api/").json()
         return payload
 
+    def me(self) -> JsonDict:
+        """The account the token belongs to.
+
+        Exists so that ``whoami`` reads through :meth:`_get` like every other
+        call here. A rejected token still answers with a JSON body -- a
+        ``detail`` rather than a user -- so reading ``username`` off it yields
+        ``None`` rather than an error, and the status code is the only thing
+        that distinguishes a dead token from a live one.
+        """
+        payload: JsonDict = self._get(f"{self.settings.api_url}/api/users/me/").json()
+        return payload
+
     def count(self, endpoint: str, **filters: Any) -> int | None:
         """Rows an endpoint reports, via the ``X-Result-Count`` header.
 
         ``filters`` are passed through, so this also counts a slice -- which is
         what :meth:`iter_list_by_month` checks each month's pull against.
+
+        ``None`` when the header is absent, and every caller that guards a pull
+        with it has to say so rather than read it as a zero -- see
+        :func:`_missing_count_header`.
         """
         response = self._get(self._url(endpoint), params={"page_size": 1, **filters})
         header = response.headers.get("x-result-count")
         return int(header) if header is not None else None
+
+    def _count_or_fail(self, endpoint: str, **filters: Any) -> int:
+        """:meth:`count`, for the callers that cannot proceed without one."""
+        total = self.count(endpoint, **filters)
+        if total is None:
+            raise _missing_count_header(endpoint)
+        return total
 
     def iter_list(
         self,
@@ -151,6 +239,8 @@ class WaldurClient:
         *,
         page_size: int = DEFAULT_PAGE_SIZE,
         today: date | None = None,
+        row_keys: Sequence[str] = (),
+        attempts: int = MONTH_ATTEMPTS,
     ) -> Iterator[JsonDict]:
         """Yield every record, pulling one ``year``/``month`` slice at a time.
 
@@ -178,12 +268,42 @@ class WaldurClient:
         the whole table over and over; the probe below catches that. And each
         month's row count is checked against ``X-Result-Count`` for that same
         filter, so a short page fails here rather than in a report.
+
+        **The month in progress is written to while it is read**, which is a
+        different fault and takes a different answer. Usage rows land as jobs
+        are accounted, and ``X-Result-Count`` is a count taken with the first
+        page while every later page's ``OFFSET`` resolves against the table as
+        it is by then. One insert mid-crawl lengthens the tail, and the pull
+        ends holding *more* rows than the count promised -- which is the portal
+        working, not failing, and used to end the whole run.
+
+        So the checks are ranked rather than run in sequence. A repeated key
+        fails always: it is the fault that costs rows, since where one came back
+        twice another never came at all, and nothing about a live month excuses
+        it. A short pull fails: fewer rows than a count taken *before* the read
+        cannot be explained by rows arriving during it. An over-long pull is
+        confirmed rather than assumed -- with no repeated key every row in hand
+        is a distinct real row, so the pull holds at least what the opening
+        count described, and a fresh count equal to the rows in hand settles
+        that it holds exactly them. Anything else is unresolved and fails.
+
+        ``row_keys`` is what makes that ruling possible, so a caller that does
+        not pass them gets the old, stricter behaviour: without a key there is
+        no way to tell a distinct row from a repeated one, and an over-long pull
+        can only be refused. :func:`waldur_tools.cache.fetch` passes
+        ``cache.ROW_KEYS``.
+
+        Every one of those faults is a race, and a race is retried ``attempts``
+        times before it is reported.
+
+        None of it runs without ``X-Result-Count``, so an endpoint that does not
+        send one ends the pull rather than being read as an empty table.
         """
-        total = self.count(endpoint)
+        total = self._count_or_fail(endpoint)
 
         # 1900 predates every Waldur deployment: a non-zero answer means the
         # filter was dropped and we are looking at the unfiltered table.
-        if self.count(endpoint, year=1900, month=1):
+        if self._count_or_fail(endpoint, year=1900, month=1):
             raise WaldurError(
                 f"{endpoint} ignores the year/month filter, so it cannot be pulled "
                 "a month at a time. Remove it from cache.BY_MONTH."
@@ -191,24 +311,113 @@ class WaldurClient:
 
         seen = 0
         for year, month in months_until(today or date.today()):
-            expected = self.count(endpoint, year=year, month=month)
-            if not expected:
-                continue
-            rows = list(self.iter_list(endpoint, page_size=page_size, year=year, month=month))
-            if len(rows) != expected:
-                raise WaldurError(
-                    f"{endpoint} {year}-{month:02d}: fetched {len(rows)} rows but the "
-                    f"server reported {expected}. Pagination is unstable; retry."
-                )
+            rows = self._pull_month(
+                endpoint,
+                year,
+                month,
+                page_size=page_size,
+                row_keys=row_keys,
+                attempts=attempts,
+            )
             seen += len(rows)
             yield from rows
 
-        if total is not None and seen != total:
+        # The months must add up to the table as a whole, or the window in
+        # months_until is too narrow and a year of usage is missing from every
+        # figure without saying so. Ruled on the way one month is: fewer rows
+        # than the table claimed is damage, more is the table having grown
+        # between that count and the last page -- and every month is already
+        # verified row by row, so a fresh count that agrees is all that is left.
+        if seen < total:
+            # Not a race, and not marked as one. Every month here was verified
+            # row by row against its own count, so the rows are not missing from
+            # the months -- there are months missing from the walk. Another run
+            # covers exactly the same window and fails in exactly the same way.
             raise WaldurError(
                 f"{endpoint}: {seen} rows across months but {total} in the table as a "
-                "whole. Either the window in client.months_until is too narrow, or "
-                "rows changed under the pull; retry."
+                "whole. Either the window in client.months_until is too narrow, or rows "
+                "were deleted while it ran."
             )
+        if seen > total:
+            now = self._count_or_fail(endpoint)
+            if now != seen:
+                raise WaldurError(
+                    f"{endpoint}: {seen} rows across months but {total} in the table as a "
+                    f"whole, and {now} in it now. Rows changed under the pull.",
+                    transient=True,
+                )
+
+    def _pull_month(
+        self,
+        endpoint: str,
+        year: int,
+        month: int,
+        *,
+        page_size: int,
+        row_keys: Sequence[str],
+        attempts: int,
+    ) -> list[JsonDict]:
+        """One month, re-pulled while it keeps coming back inconsistent."""
+        failure: WaldurError | None = None
+        for attempt in range(1, max(attempts, 1) + 1):
+            rows, failure = self._pull_month_once(
+                endpoint, year, month, page_size=page_size, row_keys=row_keys
+            )
+            if failure is None:
+                return rows
+            if attempt < attempts:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+        raise cast(WaldurError, failure)
+
+    def _pull_month_once(
+        self,
+        endpoint: str,
+        year: int,
+        month: int,
+        *,
+        page_size: int,
+        row_keys: Sequence[str],
+    ) -> tuple[list[JsonDict], WaldurError | None]:
+        """One attempt: the rows, and the reason they cannot be trusted."""
+        name = f"{endpoint} {year}-{month:02d}"
+        # Raised rather than returned as a failure: an absent header is not a
+        # race, and re-pulling the month cannot make one appear.
+        expected = self._count_or_fail(endpoint, year=year, month=month)
+        if not expected:
+            return [], None
+        rows = list(self.iter_list(endpoint, page_size=page_size, year=year, month=month))
+
+        repeats = _repeats(rows, row_keys)
+        if repeats:
+            return rows, WaldurError(
+                f"{name}: {repeats} of {len(rows)} rows repeat a key already seen, so as "
+                "many are missing. The portal paged the month inconsistently.",
+                transient=True,
+            )
+        if len(rows) == expected:
+            return rows, None
+        if len(rows) < expected:
+            return rows, WaldurError(
+                f"{name}: fetched {len(rows)} rows but the server reported {expected}. "
+                "Pagination is unstable.",
+                transient=True,
+            )
+        # More rows than the count promised and none of them a repeat: the month
+        # grew while it was read. Only a count that agrees with what is in hand
+        # settles that nothing was lost along the way.
+        if not row_keys:
+            return rows, WaldurError(
+                f"{name}: fetched {len(rows)} rows but the server reported {expected}, and "
+                "no row keys were given to tell a new row from a repeated one."
+            )
+        now = self._count_or_fail(endpoint, year=year, month=month)
+        if now == len(rows):
+            return rows, None
+        return rows, WaldurError(
+            f"{name}: fetched {len(rows)} distinct rows against a count of {expected} that "
+            f"has since moved to {now}. The month is being written to faster than it reads.",
+            transient=True,
+        )
 
     def list(self, endpoint: str, **filters: Any) -> list[JsonDict]:
         """Eagerly collect every record from a list endpoint."""

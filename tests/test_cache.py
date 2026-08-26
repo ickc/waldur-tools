@@ -7,8 +7,9 @@ import pytest
 import respx
 
 from conftest import API_URL
+from waldur_tools import client as client_module
 from waldur_tools.cache import BY_MONTH, SnapshotError, check, fetch, pull
-from waldur_tools.client import WaldurClient
+from waldur_tools.client import WaldurClient, WaldurError
 from waldur_tools.frames import to_frame
 
 USAGE = "openportal-allocation-user-usage"
@@ -104,13 +105,20 @@ def test_fetch_leaves_other_endpoints_on_the_plain_walk(settings):
 
 
 @respx.mock
-def test_pull_refuses_to_write_a_snapshot_with_repeated_rows(settings, tmp_path):
+def test_pull_refuses_to_write_a_snapshot_with_repeated_rows(settings, tmp_path, monkeypatch):
     """Better no snapshot than one that quietly doubles a month's usage.
 
     The month here returns the row count the server promised -- two rows, two
-    reported -- and both rows are the same one. That is the real failure, and
-    it is invisible to every check except the key.
+    reported -- and both rows are the same one. That is the real failure, and it
+    is invisible to every check except the key.
+
+    Caught in the client now rather than by ``check`` on the finished frame,
+    because the client needs the same test per month to rule on a month that
+    grew while it was read -- so it reaches this month first, and having tried
+    it three times. ``check`` is still the guard on a frame read back off disk;
+    it is tested directly above.
     """
+    monkeypatch.setattr(client_module, "RETRY_BACKOFF_SECONDS", 0)
 
     def handler(request):
         params = request.url.params
@@ -122,7 +130,10 @@ def test_pull_refuses_to_write_a_snapshot_with_repeated_rows(settings, tmp_path)
         return httpx.Response(200, json=body, headers={"X-Result-Count": "2"})
 
     respx.get(USAGE_URL).mock(side_effect=handler)
-    with WaldurClient(settings) as client, pytest.raises(SnapshotError, match="retry the snapshot"):
+    with (
+        WaldurClient(settings) as client,
+        pytest.raises(WaldurError, match="rows repeat a key already seen"),
+    ):
         pull(client, [USAGE], root=tmp_path, name="bad")
 
     assert not (tmp_path / "bad" / "meta.json").exists()

@@ -439,3 +439,244 @@ def test_allocations_is_empty_for_an_unknown_customer(snapshot):
     frame = reports.allocations(snapshot, customer="No Such Organisation")
     assert frame.is_empty()
     assert "mean_monthly_allocation" in frame.columns
+
+
+# -- storage quotas ---------------------------------------------------------
+
+
+@pytest.fixture
+def storage_snapshot(tmp_path, allocations, storage_reports):
+    snap = Snapshot.create(tmp_path, "storage")
+    snap.write("openportal-allocations", to_frame(allocations))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
+    snap.write_meta({})
+    return snap
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("100.00 GB", 100 * 1024**3),
+        ("5.00 TB", 5 * 1024**4),
+        ("4.00 KB", 4096),
+        ("512 B", 512),
+        ("1.5 PB", 1.5 * 1024**5),
+        # The collector is not the only thing that can write this field.
+        ("unlimited", None),
+        ("", None),
+        (None, None),
+        (17, None),
+    ],
+)
+def test_sizes_are_read_as_binary_multiples(text, expected):
+    """The portal's "GB" is a GiB -- it calls the 100G home quota 100.00 GB."""
+    assert reports._size_bytes(text) == expected
+
+
+def test_a_size_survives_the_round_trip():
+    assert reports.humanise_bytes(reports._size_bytes("46.79 GB")) == "46.79 GB"
+
+
+def test_a_petabyte_is_written_as_a_petabyte():
+    """The unit the parser accepts is the unit the renderer has to reach.
+
+    A project quota measured in petabytes is not hypothetical on a machine this
+    size, and rendering it as four figures of terabytes would be exactly the
+    fourteen digits of noise this function exists to avoid.
+    """
+    assert reports.humanise_bytes(1024**5) == "1.00 PB"
+    assert reports.humanise_bytes(2.5 * 1024**5) == "2.50 PB"
+
+
+def test_the_last_day_of_a_month_comes_from_the_top_level_snapshot(storage_snapshot):
+    """The daily dictionary stops a day short; the snapshot beside it does not.
+
+    January's `daily_reports` carry the 29th and the 30th, and the reading for
+    the 31st exists only as the top-level snapshot. Reading one and not the
+    other silently loses the last day of every finished month.
+    """
+    samples = reports.storage_samples(storage_snapshot)
+    january = samples.filter(
+        (pl.col("month") == date(2025, 1, 1))
+        & (pl.col("kind") == "project")
+        & (pl.col("project_code") == "abc1")
+    )
+    assert sorted({str(day) for day in january["date"].to_list()}) == [
+        "2025-01-29",
+        "2025-01-30",
+        "2025-01-31",
+    ]
+
+
+def test_the_month_in_progress_is_a_single_reading(storage_snapshot):
+    """February has no `daily_reports` at all, only the snapshot.
+
+    So every statistic collapses onto one number, and a figure that assumed a
+    series would be drawing one point as though it were thirty.
+    """
+    monthly = reports.storage_monthly(storage_snapshot)
+    february = monthly.filter((pl.col("month") == date(2026, 2, 1)) & (pl.col("kind") == "project"))
+    assert february.height == 1
+    row = february.row(0, named=True)
+    assert row["days_observed"] == 1
+    assert row["peak_fill_pct"] == row["end_fill_pct"] == row["median_fill_pct"]
+
+
+def test_both_collectors_are_kept_as_separate_samples(storage_snapshot):
+    """Two resources report the same filesystem minutes apart, and disagree.
+
+    Deduplicating them would throw away half the evidence for the month;
+    treating them as separate readings of one quantity is what makes the peak
+    the real peak rather than one collector's view of it.
+    """
+    monthly = reports.storage_monthly(storage_snapshot)
+    row = monthly.filter(
+        (pl.col("month") == date(2025, 1, 1))
+        & (pl.col("kind") == "project")
+        & (pl.col("project_code") == "abc1")
+    ).row(0, named=True)
+    # Three days, two collectors each.
+    assert row["days_observed"] == 3
+    assert row["samples"] == 6
+    # Peak is the highest of the six, not the highest daily mean.
+    assert row["peak_fill_pct"] == pytest.approx(100 * 3.10 / 20)
+    # The median sits on the middle pair, so it is nothing like the peak --
+    # which is the whole reason both are offered.
+    assert row["median_fill_pct"] == pytest.approx(100 * 2.05 / 20)
+
+
+def test_a_month_short_of_readings_is_marked_partial(storage_snapshot):
+    """Partial here means "fewer daily readings than days", not "this month".
+
+    Different from `monthly_totals`, where it marks the month the snapshot was
+    taken in. Storage lags its own collector, so the snapshot date says nothing
+    about whether a storage month is complete.
+    """
+    monthly = reports.storage_monthly(storage_snapshot)
+    assert monthly["is_partial"].all()
+    assert monthly["days_observed"].max() < 31
+
+
+def test_a_reading_outside_its_month_is_dropped(storage_snapshot):
+    """A February reading filed in a January row belongs to neither column."""
+    samples = reports.storage_samples(storage_snapshot, scope=False)
+    abc2 = samples.filter(pl.col("project_code") == "abc2")
+    assert abc2.height == 1
+    assert str(abc2["date"][0]) == "2025-01-31"
+
+
+def test_the_end_of_a_month_is_the_last_sample_and_not_the_last_readable_one(
+    storage_snapshot,
+):
+    """`end` answers "what was it on the last reading", nulls included.
+
+    Bob's home was read three days running and only the last of them came back
+    unparseable. Reporting the 30th as the end would put a stale level beside a
+    limit taken from the 31st -- a row internally inconsistent with itself, and
+    silently so, since nothing on the figure says which day each half came from.
+    """
+    monthly = reports.storage_monthly(storage_snapshot)
+    row = monthly.filter(
+        (pl.col("month") == date(2025, 1, 1))
+        & (pl.col("username") == "bob")
+        & (pl.col("filesystem") == "home")
+    ).row(0, named=True)
+    assert row["end_fill_pct"] is None
+    assert row["end_bytes"] is None
+    assert row["limit_bytes"] is None
+    # The readable days still carry the peak and the median.
+    assert row["peak_bytes"] == pytest.approx(95 * 1024**3)
+
+
+def test_a_quota_raised_mid_month_leaves_the_month_without_one(storage_snapshot):
+    """Three statistics of one month are not three parts of one reading.
+
+    The peak fill, the peak size and the median are each chosen on their own,
+    and while a single quota holds all month that costs nothing: `fill_pct` is
+    then a fixed multiple of `usage_bytes`, so the maximum and the median carry
+    straight through it and the three agree by construction. Alice's scratch
+    quota is raised between the 29th and the 30th, and they stop agreeing --
+    the median fill is taken over one set of limits and the median size over
+    another. `limit_bytes` goes null rather than picking one of them, which is
+    how the hover is told not to write the three as "X of Y".
+    """
+    monthly = reports.storage_monthly(storage_snapshot)
+    row = monthly.filter(
+        (pl.col("month") == date(2025, 1, 1))
+        & (pl.col("username") == "alice")
+        & (pl.col("filesystem") == "scratch")
+    ).row(0, named=True)
+    assert row["limit_bytes"] is None
+    # And not merely unreported: dividing the median size by either limit the
+    # month held misses the median fill, which is the lie being prevented.
+    for limit in (4 * 1024**4, 5 * 1024**4):
+        assert row["median_fill_pct"] != pytest.approx(100 * row["median_bytes"] / limit)
+
+
+def test_a_limit_that_is_not_a_size_blanks_the_percentage(storage_snapshot):
+    """Null, not zero and not a division by it: the quota is simply unknown."""
+    current = reports.storage(storage_snapshot)
+    abc2 = current.filter(pl.col("project_code") == "abc2").row(0, named=True)
+    assert abc2["limit_bytes"] is None
+    assert abc2["fill_pct"] is None
+    assert abc2["usage_bytes"] == pytest.approx(1024**4)
+
+
+def test_storage_is_scoped_like_every_other_report(storage_snapshot):
+    """The endpoint reports the whole machine; the page is about our projects."""
+    ours = reports.storage(storage_snapshot)
+    everyone = reports.storage(storage_snapshot, scope=False)
+    assert "zzz9" not in ours["project_code"].to_list()
+    assert "zzz9" in everyone["project_code"].to_list()
+
+
+def test_the_current_view_is_fullest_first_and_most_recent(storage_snapshot):
+    """The table is read top down, and each row is the newest reading of it."""
+    current = reports.storage(storage_snapshot)
+    fills = [value for value in current["fill_pct"].to_list() if value is not None]
+    assert fills == sorted(fills, reverse=True)
+    # February's reading wins over January's for the same quota.
+    alice = current.filter((pl.col("username") == "alice") & (pl.col("filesystem") == "home")).row(
+        0, named=True
+    )
+    assert str(alice["date"]) == "2026-02-18"
+
+
+def test_storage_can_be_narrowed_to_one_organisation(tmp_path, allocations, storage_reports):
+    """Scope keeps every project the *token* administers, across customers.
+
+    On a multi-tenant portal that is more than one organisation, and a report
+    headed by one customer's name must not draw another's disks beside them.
+    """
+    elsewhere = {
+        **allocations[0],
+        "url": f"{API_URL}/api/openportal-allocations/zzz/",
+        "uuid": "zzz",
+        "project_name": "Elsewhere",
+        "project_uuid": "pz",
+        "customer_name": "Other Uni",
+        "groupname": "brics.zzz9",
+        "backend_id": "zzz9.brics",
+    }
+    snap = Snapshot.create(tmp_path, "two-customers")
+    snap.write("openportal-allocations", to_frame([*allocations, elsewhere]))
+    snap.write("openportal-project-storage-reports", to_frame(storage_reports))
+    snap.write_meta({})
+
+    administered = set(reports.storage_samples(snap)["project_code"].to_list())
+    assert administered == {"abc1", "abc2", "zzz9"}
+    ours = set(reports.storage_samples(snap, customer="UKRI")["project_code"].to_list())
+    assert ours == {"abc1", "abc2"}
+    # `scope=False` is the whole machine by definition, so naming a customer
+    # inside it would be two filters contradicting each other.
+    everyone = reports.storage_samples(snap, customer="UKRI", scope=False)
+    assert set(everyone["project_code"].to_list()) == {"abc1", "abc2", "zzz9"}
+
+
+def test_storage_survives_a_snapshot_that_never_pulled_it(tmp_path, allocations):
+    """Older snapshots predate the endpoint, and must not fail the whole report."""
+    snap = Snapshot.create(tmp_path, "old")
+    snap.write("openportal-allocations", to_frame(allocations))
+    snap.write_meta({})
+    assert reports.storage(snap).is_empty()
+    assert reports.storage_monthly(snap).is_empty()
