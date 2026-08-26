@@ -235,13 +235,62 @@ def test_by_month_rejects_a_month_that_came_back_short(settings):
 
 @respx.mock
 def test_by_month_rejects_a_walk_that_misses_rows(settings):
-    """Months that do not add up to the table mean the window is too narrow."""
+    """Months that do not add up to the table mean the window is too narrow.
+
+    And that is a configuration fault, not a race: every month here was already
+    checked row by row against its own count, so the rows are not missing from
+    the months -- there are months missing from the walk. Marking it transient
+    would hand back the command with an invitation to run it again, and the
+    second run covers the same window and fails in the same place.
+    """
     usage_endpoint({(2026, 1): [{"n": 1}]}, total=9)
     with (
         WaldurClient(settings) as client,
-        pytest.raises(WaldurError, match="1 rows across months but 9"),
+        pytest.raises(WaldurError, match="1 rows across months but 9") as raised,
     ):
         list(client.iter_list_by_month("openportal-allocation-user-usage", today=date(2026, 1, 5)))
+    assert raised.value.transient is False
+
+
+@respx.mock
+def test_by_month_marks_a_walk_the_table_outgrew_as_worth_retrying(settings):
+    """The other side of the same check, and the one a rerun really does fix.
+
+    The month itself settles -- it is over-long, repeats no key, and a fresh
+    count confirms what is in hand -- and the table it belongs to keeps growing
+    underneath, so the walk ends holding more rows than the opening count and
+    more than the closing one too. Nothing about that is the command's fault.
+    """
+    # Counted twice: once to open the walk and once to close it, and the table
+    # has moved on again in between.
+    whole_table = iter(["2", "5"])
+
+    def handler(request):
+        params = request.url.params
+        if "year" not in params:
+            return httpx.Response(200, json=[], headers={"X-Result-Count": next(whole_table)})
+        key = (int(params["year"]), int(params["month"]))
+        if key != (2026, 1):
+            return httpx.Response(200, json=[], headers={"X-Result-Count": "0"})
+        body = [] if params.get("page_size") == "1" else usage_rows(3)
+        # The count the month is judged against grows with it, so the month
+        # passes and only the whole-table check is left to disagree.
+        return httpx.Response(200, json=body, headers={"X-Result-Count": "3"})
+
+    respx.get(USAGE_URL).mock(side_effect=handler)
+    with (
+        WaldurClient(settings) as client,
+        pytest.raises(WaldurError, match="rows across months but") as raised,
+    ):
+        list(
+            client.iter_list_by_month(
+                "openportal-allocation-user-usage",
+                today=date(2026, 1, 5),
+                row_keys=USAGE_KEYS,
+                attempts=1,
+            )
+        )
+    assert raised.value.transient is True
 
 
 @respx.mock

@@ -521,17 +521,34 @@ async function pullMonths(client, endpoint, {
   // while more is the table having grown between this count and the last page
   // -- and every month here has already been verified row by row, so a fresh
   // count that agrees is the whole of what is left to check.
-  if (seen !== total) {
-    const now = seen > total ? await client.count(endpoint) : null;
+  if (seen < total) {
+    // Not a race, and not marked as one. Every month here was verified row by
+    // row against its own count, so the rows are not missing from the months --
+    // there are months missing from the walk, and a second attempt covers the
+    // same window and fails the same way. Offering the button is not the same
+    // as saying it is worth pressing.
+    return {
+      ok: false,
+      cached,
+      rows,
+      error: new WaldurError(
+        `${endpoint}: ${seen} rows across months but ${total} in the table as a whole. ` +
+          'Either the window in monthsUntil is too narrow, or rows were deleted while ' +
+          'it ran.',
+      ),
+    };
+  }
+  if (seen > total) {
+    const now = await client.count(endpoint);
+    if (now === null) throw missingCountHeader(endpoint);
     if (now !== seen) {
       return {
         ok: false,
         cached,
         rows,
         error: new WaldurError(
-          `${endpoint}: ${seen} rows across months but ${total} in the table as a whole` +
-            `${now === null ? '' : `, and ${now} in it now`}. Either the window in ` +
-            'monthsUntil is too narrow, or rows changed under the pull.',
+          `${endpoint}: ${seen} rows across months but ${total} in the table as a whole, ` +
+            `and ${now} in it now. Rows changed under the pull.`,
           { transient: true },
         ),
       };

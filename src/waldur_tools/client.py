@@ -328,14 +328,22 @@ class WaldurClient:
         # than the table claimed is damage, more is the table having grown
         # between that count and the last page -- and every month is already
         # verified row by row, so a fresh count that agrees is all that is left.
-        if seen != total:
-            now = self._count_or_fail(endpoint) if seen > total else None
+        if seen < total:
+            # Not a race, and not marked as one. Every month here was verified
+            # row by row against its own count, so the rows are not missing from
+            # the months -- there are months missing from the walk. Another run
+            # covers exactly the same window and fails in exactly the same way.
+            raise WaldurError(
+                f"{endpoint}: {seen} rows across months but {total} in the table as a "
+                "whole. Either the window in client.months_until is too narrow, or rows "
+                "were deleted while it ran."
+            )
+        if seen > total:
+            now = self._count_or_fail(endpoint)
             if now != seen:
-                moved = "" if now is None else f", and {now} in it now"
                 raise WaldurError(
                     f"{endpoint}: {seen} rows across months but {total} in the table as a "
-                    f"whole{moved}. Either the window in client.months_until is too "
-                    "narrow, or rows changed under the pull.",
+                    f"whole, and {now} in it now. Rows changed under the pull.",
                     transient=True,
                 )
 

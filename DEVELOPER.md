@@ -910,7 +910,13 @@ The checks are therefore ranked rather than run in sequence, in both
 
 That last confirmation costs one extra count request, and only when the numbers
 disagree. The whole-table check at the end of the walk is ruled on the same way,
-since a month that legitimately grew would otherwise fail there instead.
+since a month that legitimately grew would otherwise fail there instead — with
+one difference in what it *means*. A short walk there is not a short pull: every
+month in it has already been checked row by row against its own count, so the
+rows are not missing from the months, there are months missing from the window.
+That is the `months_until`/`monthsUntil` horizon being too narrow, which is a
+fault in this code and not a race, and it is reported without the retry advice
+below.
 
 Every one of those faults is a race, so a month is re-pulled
 `client.MONTH_ATTEMPTS` times before it is reported — one month is a handful of

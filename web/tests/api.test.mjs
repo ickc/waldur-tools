@@ -400,11 +400,37 @@ describe('pulling every month', () => {
 
   it('fails when the months do not add up to the table as a whole', async () => {
     // The window in `monthsUntil` being too narrow looks exactly like this, and
-    // silently drops a year of usage out of every figure.
+    // silently drops a year of usage out of every figure. It is also a fault in
+    // this code rather than a race, so it is not offered as worth retrying: the
+    // second run walks the same window and stops in the same place.
     portal(usageRows(4, { year: 2023, month: 5 }), { countOverride: null });
     await assert.rejects(
       () => pullByMonth(client(), ENDPOINT, { today }),
-      (error) => /rows across months but/.test(error.message),
+      (error) => /rows across months but/.test(error.message) && error.transient === false,
+    );
+  });
+
+  it('marks a walk the table outgrew as worth retrying', async () => {
+    // The other side of the same check. The month settles -- over-long,
+    // repeating no key, and confirmed by a fresh count -- while the table it
+    // belongs to keeps growing underneath, so the walk ends holding more rows
+    // than either whole-table count. That one really does clear on a rerun.
+    const wholeTable = ['2', '5'];
+    globalThis.fetch = async (target) => {
+      const url = new URL(target);
+      const params = url.searchParams;
+      if (!params.has('year')) {
+        return reply([], { headers: { 'x-result-count': wholeTable.shift() }, url: String(url) });
+      }
+      if (params.get('year') !== '2026' || params.get('month') !== '2') {
+        return reply([], { headers: { 'x-result-count': '0' }, url: String(url) });
+      }
+      const body = params.get('page_size') === '1' ? [] : usageRows(3);
+      return reply(body, { headers: { 'x-result-count': '3' }, url: String(url) });
+    };
+    await assert.rejects(
+      () => pullByMonth(client(), ENDPOINT, { today }),
+      (error) => /rows across months but/.test(error.message) && error.transient === true,
     );
   });
 
