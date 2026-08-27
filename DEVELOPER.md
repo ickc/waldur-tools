@@ -208,9 +208,9 @@ month, aggregated through the private base frame `reports._monthly_rows`.
 
 The split is not stylistic. **When a project's allocation is terminated the
 portal stops returning its usage rows entirely** — every month it ever ran, not
-only the months since — while its invoices stand. Measured against a snapshot
-holding three terminated projects, the usage endpoint had zero rows for all
-three across the whole table. So a total summed out of that endpoint shrinks
+only the months since — while its invoices stand. Every terminated project seen
+so far has had no usage rows anywhere in the table, not merely none since it
+ended. So a total summed out of that endpoint shrinks
 every time a project finishes, and shrinks retrospectively: last January's
 figure is smaller today than it was in January. The ledger does not move. There
 is no join that recovers those rows — widening the scope to include terminated
@@ -520,15 +520,15 @@ adding `missing_node_hours` back brings it inside the same allowance. That is a
 terminated project whose usage rows the portal has dropped, and it is not a
 defect in the pull, the scope or the billing. It leaves no reported figure
 wrong either, because the reported figures are `billed_node_hours`; what it does
-leave short is `active_users`, which has no ledger to come from. Measured
-against real snapshots, the terminated projects accounted for better than 99.8%
-of the gap in every month that had one.
+leave short is `active_users`, which has no ledger to come from. On the
+snapshots seen so far the terminated projects have accounted for very nearly
+the whole of the gap in every month that had one.
 
 Both thresholds are set to catch a broken pull rather than to audit rounding.
 The two sides are rolled up differently — the usage endpoint rounds each
 user-month to two decimals, the invoice keeps ten — and on a correctly pulled
 snapshot every complete month still agrees to a small fraction of a percent:
-well under a node hour of drift on totals in the tens of thousands. The
+less than a node hour of drift on a month's total. The
 absolute floor exists because an invoice can carry a project whose allocation
 this token cannot see (a project can appear on an invoice with no visible
 allocation behind it, for a small handful of node hours in some months), and

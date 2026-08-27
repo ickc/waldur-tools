@@ -463,10 +463,9 @@ def _monthly_rows(
     usage rows -- every month of them, not just the months since. The rows are
     gone from the endpoint, so no join here reaches them: widening the scope to
     include terminated ``marketplace-resources`` returns exactly the same
-    totals, because there is nothing on the other side to match. Measured
-    against a snapshot holding three terminated projects, the usage endpoint
-    had zero rows for all three across the whole table, while their invoices
-    were untouched.
+    totals, because there is nothing on the other side to match. Every
+    terminated project seen so far has had no usage rows anywhere in the table,
+    not merely none since it ended, while its invoices were untouched.
 
     So this is the *per-user* series and nothing else. Anything that needs a
     total takes it from :func:`invoiced_projects`, which is a decomposition of
