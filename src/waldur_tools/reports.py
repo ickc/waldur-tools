@@ -555,6 +555,36 @@ def _entitlement(nodes: int, share: float) -> pl.Expr:
     return nodes * share * 24 * days
 
 
+def _ledger_months(
+    billed: pl.DataFrame, header: pl.DataFrame, *, tolerance: float = RECONCILE_TOLERANCE
+) -> list[date]:
+    """The months whose ``node_hours`` may be read off the invoice.
+
+    An invoice existing is not enough. What the reports print is the *split* --
+    :func:`invoiced_projects`, the lines read one at a time -- and the lines can
+    go missing without the header moving: :func:`invoiced_projects` keeps only
+    what still looks like a usage line, and returns nothing at all for an
+    invoice whose ``items`` did not survive the pull. Trusting the header alone
+    would then read every project in that month as billed zero, label it
+    ``invoice``, and say nothing.
+
+    So a month is ledger-backed only where its lines sum to its own header,
+    within the allowance :func:`reconcile` uses -- the same condition, so a
+    month that falls back here is a month ``reconcile`` reports as
+    ``split incomplete`` rather than one that silently changed measurement.
+    """
+    if header.is_empty():
+        return []
+    lines = billed.group_by("month").agg(billed_node_hours=pl.col("node_hours").sum())
+    allowed = pl.max_horizontal(pl.lit(RECONCILE_FLOOR), tolerance * pl.col("incurred_costs").abs())
+    difference = pl.col("billed_node_hours").fill_null(0.0) - pl.col("incurred_costs")
+    return (
+        header.join(lines, on="month", how="left")
+        .filter(difference.abs() <= allowed)["month"]
+        .to_list()
+    )
+
+
 def _ledger_or_usage(
     billed: pl.DataFrame,
     used: pl.DataFrame,
@@ -567,10 +597,11 @@ def _ledger_or_usage(
     The rule is per month rather than per row. **In a month the portal has
     invoiced, the invoice is the answer and a row missing from it is a zero**:
     it billed nothing, which is a figure, not an absence. In a month it has not
-    invoiced yet there is no ledger to read, so the usage roll-up stands in --
-    and ``node_hours_source`` says which of the two any given row came from,
-    because a reader comparing two months should know when they are comparing
-    two different measurements.
+    invoiced yet -- or has invoiced something its own lines no longer add up to,
+    see :func:`_ledger_months` -- there is no ledger to read, so the usage
+    roll-up stands in, and ``node_hours_source`` says which of the two any given
+    row came from, because a reader comparing two months should know when they
+    are comparing two different measurements.
 
     ``usage_node_hours`` is kept beside it either way. It is what
     :func:`reconcile` checks the ledger against, and on a project the usage
@@ -633,7 +664,7 @@ def monthly(
     if rows.is_empty() and billed.is_empty():
         return rows
 
-    months = invoiced(source, customer=scoped)["month"].to_list()
+    months = _ledger_months(billed, invoiced(source, customer=scoped))
 
     used = rows.group_by("month", "project_uuid").agg(
         usage_node_hours=pl.col("node_usage").sum(),
@@ -711,7 +742,7 @@ def monthly_totals(
     if rows.is_empty() and billed.is_empty():
         return rows
 
-    months = invoiced(source, customer=scoped)["month"].to_list()
+    months = _ledger_months(billed, invoiced(source, customer=scoped))
     used = rows.group_by("month").agg(
         usage_node_hours=pl.col("node_usage").sum(),
         active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),

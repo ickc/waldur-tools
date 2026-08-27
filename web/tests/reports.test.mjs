@@ -98,3 +98,29 @@ describe('an invoice its own lines no longer add up to', () => {
     }
   });
 });
+
+describe('a month whose invoice lines no longer add up', () => {
+  it('is not read off that invoice as if the missing lines were zeros', () => {
+    const invoices = withALostLine(fixture.invoices);
+    const before = new Map(
+      reports.monthlyTotals(rows, fixture.invoices, { nodes, share, scope, customer, asOf })
+        .map((row) => [row.month, row]),
+    );
+    const after = reports.monthlyTotals(rows, invoices, {
+      nodes, share, scope, customer, asOf,
+    });
+    const lost = reports.reconcile(rows, invoices, { customer, scope, asOf })
+      .filter((row) => row.status === 'split incomplete')
+      .map((row) => row.month);
+    assert.ok(lost.length > 0);
+    for (const row of after) {
+      if (!lost.includes(row.month)) {
+        // Untouched months must keep reading off the ledger exactly as before.
+        assert.equal(row.node_hours_source, before.get(row.month).node_hours_source);
+        continue;
+      }
+      assert.equal(row.node_hours_source, 'usage');
+      assert.equal(row.node_hours, row.usage_node_hours);
+    }
+  });
+});

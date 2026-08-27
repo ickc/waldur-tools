@@ -223,9 +223,9 @@ report a number that decays, and this reports the ledger.
 | `month` | `date(year, month, 1)` from the two integer columns |
 | `node_hours` | `sum(items[].quantity)` over that month's invoice usage lines — for `monthly`, that project's lines only |
 | `usage_node_hours` | the same month's `sum(node_usage)` out of the usage endpoint, kept as the visible cross-check; **null** where the endpoint no longer describes the project |
-| `node_hours_source` | `invoice` in a month the portal has invoiced, `usage` in one it has not — see below |
+| `node_hours_source` | `invoice` in a month whose invoice lines sum to their own header, `usage` in one the portal has not invoiced or whose lines no longer do — see below |
 | `active_users` | distinct `unix_username` **with non-zero usage**, so it reads as "who ran", not "who could have"; **null** on a project with no usage rows left, and a **lower bound** on any month where `projects_without_usage` is above zero |
-| `active_projects` | distinct billed projects with non-zero node hours — off the ledger, so a terminated project still counts (totals only) |
+| `active_projects` | distinct projects with non-zero node hours, counted on whichever side `node_hours_source` names — off the ledger a terminated project still counts (totals only) |
 | `projects_with_usage_rows` | distinct project codes reporting *at all* that month in the usage endpoint, zero included (totals only) |
 | `projects_without_usage` | billed projects that endpoint no longer describes — how far `active_users` is understated (totals only) |
 | `entitlement_node_hours` | `nodes * share * 24 * days_in_month` — see below |
@@ -240,6 +240,15 @@ it billed nothing, which is a figure rather than an absence. In a month not yet
 invoiced there is no ledger to read and the usage roll-up stands in. A snapshot
 pulled without the `invoices` endpoint at all degrades the same way rather than
 failing, and every month then reads `usage`.
+
+An invoice existing is not on its own enough for `invoice`. What these reports
+print is the *split* — the lines read one at a time — and lines can go missing
+without the header moving: only what still looks like a usage line is kept, and
+an invoice whose `items` did not survive the pull yields none at all. Trusting
+the header there would read every project that month as billed zero and label
+it `invoice`. So a month qualifies only where its lines sum to its own header,
+on the allowance `reconcile` uses — the same condition, so a month that falls
+back this way is one `reconcile` reports as `split incomplete`.
 
 Only the invoice lines priced at one credit an hour are summed
 (`measured_unit == "hours"` and `unit_price == 1`). The credit line that zeroes

@@ -321,9 +321,32 @@ export function monthlyRows(usage, scope, customer = null) {
  * invoiced there is no ledger to read and the usage roll-up stands in, and
  * `node_hours_source` says which -- because a reader comparing two months
  * should know when they are comparing two different measurements.
+ *
+ * An invoice existing is not enough. What the reports print is the *split* --
+ * `invoicedProjects`, the lines read one at a time -- and lines can go missing
+ * without the header moving: only what still looks like a usage line is kept,
+ * and an invoice whose `items` did not survive the pull yields none at all.
+ * Trusting the header alone would read every project that month as billed
+ * zero, label it `invoice`, and say nothing. So a month is ledger-backed only
+ * where its lines sum to its own header, on the allowance `reconcile` uses --
+ * the same condition, so a month that falls back here is one `reconcile`
+ * reports as `split incomplete`.
  */
-function ledgerMonths(invoices, customer) {
-  return new Set(invoiced(invoices, customer).map((row) => row.month));
+function ledgerMonths(invoices, scope, customer, tolerance = RECONCILE_TOLERANCE) {
+  const lines = new Map();
+  for (const [month, bucket] of groupBy(
+    invoicedProjects(invoices, scope, customer), (row) => row.month,
+  )) {
+    lines.set(month, sumOf(bucket, 'node_hours'));
+  }
+  const backed = new Set();
+  for (const row of invoiced(invoices, customer)) {
+    const allowed = Math.max(RECONCILE_FLOOR, tolerance * Math.abs(row.incurred_costs));
+    if (Math.abs((lines.get(row.month) ?? 0) - row.incurred_costs) <= allowed) {
+      backed.add(row.month);
+    }
+  }
+  return backed;
 }
 
 /**
@@ -352,7 +375,7 @@ export function monthlyTotals(rows, invoices, {
   nodes = TOTAL_NODES, share = DEFAULT_SHARE, scope = [], customer = null, asOf,
 } = {}) {
   const partial = monthOf(asOf);
-  const ledger = ledgerMonths(invoices, customer);
+  const ledger = ledgerMonths(invoices, scope, customer);
   const billed = new Map();
   for (const [month, bucket] of groupBy(
     invoicedProjects(invoices, scope, customer), (row) => row.month,
@@ -427,7 +450,7 @@ export function monthlyTotals(rows, invoices, {
 export function monthly(rows, invoices, {
   nodes = TOTAL_NODES, share = DEFAULT_SHARE, scope = [], customer = null,
 } = {}) {
-  const ledger = ledgerMonths(invoices, customer);
+  const ledger = ledgerMonths(invoices, scope, customer);
   const key = (month, uuid) => `${month}\u0000${uuid}`;
 
   const used = new Map();

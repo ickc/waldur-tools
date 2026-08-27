@@ -281,6 +281,36 @@ def test_monthly_falls_back_to_usage_in_a_month_with_no_invoice(tmp_path, alloca
     assert row["active_projects"] == 1
 
 
+def test_monthly_totals_do_not_read_a_month_off_an_invoice_that_lost_its_lines(
+    tmp_path, allocations
+):
+    """A split that does not add up is not a ledger, and zero is not what it says.
+
+    The header still bills the full month, so the month looks invoiced; the
+    lines the report actually sums no longer reach it. Reading it as the ledger
+    would print every project short -- and a month whose lines are gone
+    entirely as billed nothing at all -- labelled `invoice` either way.
+    """
+    rows = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "500.0",
+            "year": 2026,
+            "month": 4,
+        }
+    ]
+    lost = invoice(2026, 4, {"pa": 500.0})
+    lost["items"][0]["measured_unit"] = "GB"  # storage, as far as the filter can tell
+    snap = reconciling(tmp_path, "totals-split-lost", allocations, rows, [lost])
+
+    row = reports.monthly_totals(snap, customer="UKRI").row(0, named=True)
+    assert row["node_hours"] == pytest.approx(500.0)
+    assert row["node_hours_source"] == "usage"
+    assert row["active_projects"] == 1
+
+
 def test_monthly_totals_still_report_without_an_invoices_endpoint(tmp_path, allocations):
     """A snapshot pulled without `invoices` degrades to usage, and says it did."""
     rows = [
