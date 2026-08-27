@@ -36,9 +36,17 @@ LICENSE = VENDOR / "plotly.LICENSE"
 
 
 def _plotly_license() -> str:
-    """The MIT text plotly ships in its distribution metadata."""
+    """The MIT text plotly ships in its own distribution metadata.
+
+    Only the metadata directory is searched, not the whole installed tree.
+    plotly also ships licence files as package data -- the third-party notices
+    for the bundled JupyterLab extension -- and those cover somebody else's
+    code. The one that covers `plotly.min.js` is the one the wheel declares.
+    """
     dist = distribution("plotly")
     for path in dist.files or []:
+        if not path.parts[0].endswith((".dist-info", ".egg-info")):
+            continue
         if path.name.upper().startswith("LICENSE"):
             return path.read_text(encoding="utf-8")
     raise SystemExit("plotly ships no LICENSE file to copy into the archive")
