@@ -4,6 +4,115 @@ Snapshot, analyse and report on data from the [Waldur](https://docs.waldur.com/)
 portal behind [Isambard](https://portal.isambard.ac.uk) — the same API the
 `gw4-isambard/rse-sharing` example script talks to, wrapped as a proper package.
 
+## TL;DR
+
+The rest of this README is reference material to come back to. This section is
+what a colleague needs before touching anything.
+
+### Three ways to consume it, one picture
+
+Everything here is **read-only** against the portal — no command in this repo
+writes anything back to Waldur.
+
+| | How you run it | Token | Who it is for |
+| --- | --- | --- | --- |
+| **Chrome extension** — [`web/`](web/README.md) | `chrome://extensions` → *Developer mode* → *Load unpacked* on `web/`, open your organisation's dashboard in the portal, press the toolbar button | read out of the portal tab for you | anyone who wants the answer and not the toolchain |
+| **CLI** | `pixi run waldur-tools report <name>` | pasted by hand into `.envrc.local` | ad-hoc questions, CSV/JSON/parquet export |
+| **HTML report** | `pixi run waldur-tools viz -o utilisation.html` | ditto | one self-contained page you can email |
+
+Run the two Python paths from an Isambard 3 login node where you can: `sacct`
+lives there, it is the only source of per-job shape, and `viz` gains three
+figures when a capture is present. Neither path requires it.
+
+**The extension is the baseline experience** — nothing installed but the
+extension, nothing pasted, built live off the tab you are already signed in to
+and cached in the browser. It is an extension rather than a URL you could just
+visit because the deployment's CORS allowlist holds exactly one origin, the
+portal's own front end, so a hosted page — or one opened from disk — can never
+read the API; host permissions are the way around that.
+
+The Python side has had the closer scrutiny, and the two are kept in lock-step:
+the Python reports emit a golden fixture and CI fails if the JavaScript
+arithmetic drifts off it. If maintaining both ever stops being worth it, the
+proposal is to keep the extension and retire the Python side, not the reverse.
+
+### How it was built, and how far to trust it
+
+- **Agentically.** The high-level design and the review are mine; I have not
+  read the detailed implementation closely.
+- **The uncertainty lives in the API, not in the code.** Getting data back is
+  easy; knowing what it means is not, and this deployment publishes no schema.
+  Two cases that have already bitten: one endpoint cannot be paged end to end
+  (`LIMIT`/`OFFSET` returns some rows two or three times and never returns
+  others, which inflated a month's headline), and `node_usage` means "the month
+  so far" on one endpoint and a summable monthly figure on another, with nothing
+  in the name to say so.
+- **So correctness is asserted at the top, not the bottom.** The check that
+  counts is agreement with the official Isambard dashboard (portal → your
+  organisation → *Dashboard*). BriCS build that from the same API, so matching
+  *their* reading of it is the safest evidence available. Two automated
+  cross-checks back it up: `report reconcile` puts our node hours beside what
+  the portal actually invoiced — the same quantity by a completely different
+  route — and every pull and every read rejects repeated rows.
+- **The stakes are low.** A summary statistic or a figure being wrong costs us
+  little. The corollary matters more than the reassurance: **when a number looks
+  surprising, treat it as suspect rather than as a finding** — check it against
+  `sacct`, the official dashboard, the affected users, or BriCS staff before
+  repeating it.
+- **The one thing that is not low stakes is secrets.** Hence the hard rule that
+  nothing snapshot-derived — figures, project codes, usernames — goes into git
+  (see [CLAUDE.md](CLAUDE.md)), and no token is ever committed. Even that is
+  bounded: portal tokens are read-only and expire within hours.
+
+### The number people misread
+
+Every percentage in the report is usage against **our 10% share of Isambard 3 —
+38.4 of its 384 nodes, held for every hour of every month**. 100% means "we ran,
+on average, exactly the nodes we hold", not a ceiling: nothing reserves those
+nodes for us and nothing stops us exceeding them, so months over 100% are real.
+
+### How the extension gets your token, and why that is sound
+
+Pressing the toolbar button injects a small read-only function into the portal
+tab (`activeTab`, plus a host permission for the portal front end so a portal
+tab that is merely open can be read too). It reads three things: the session
+token from `localStorage` under `waldur/auth/token` — the same string the
+account menu's *Copy API token* hands you — the API origin, and your
+organisation's UUID. The readings sit in a `Map` in the service worker, keyed by
+the report tab they were taken for, and are dropped the moment that tab collects
+them.
+
+Four properties are what make that sound rather than merely convenient:
+
+- **It does not touch disk.** The token lives in a variable, and only in
+  `chrome.storage.session` — gone at browser exit — if you tick *remember*.
+  Never `localStorage`.
+- **It only goes back where it came from.** The token is sent to an API URL
+  inferred from that same tab. When the URL cannot be worked out, the extension
+  shows its gate with the URL box blank rather than falling back to a built-in
+  default — precisely so one deployment's credential can never be sent to
+  another.
+- **It is verified, not assumed.** `waldur/auth/token` is a HomePort internal,
+  not a documented API, and a Waldur upgrade may rename it. So the token is put
+  to `users/me/` before anything is built, and one the portal rejects demotes
+  cleanly to the paste box with the reason on it.
+- **It is cheap to lose.** Read-only, about an hour of life, and a 401
+  mid-session is answered by re-reading the portal tab — whose front end has
+  been refreshing the token all along — and retrying once.
+
+Worst case is therefore a read-only credential with an hour to live, held in
+memory, sent to exactly one origin. [web/README.md](web/README.md) has the
+detail.
+
+### Where to go next
+
+- [DEVELOPER.md](DEVELOPER.md) — the data model and every derived column with
+  its formula. Read it before quoting a number.
+- [web/README.md](web/README.md) — the extension, and how its arithmetic is held
+  to the Python one's.
+- `pixi run waldur-tools report reconcile` — run it before quoting anything
+  monthly.
+
 ## What it does
 
 - **Snapshot** — pull whole endpoints into parquet, so large tables are fetched
