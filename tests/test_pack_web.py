@@ -88,7 +88,7 @@ def test_plotly_s_licence_ships_beside_its_bundle(tree):
 def test_a_missing_plotly_licence_stops_the_release(tree):
     module = load()
     (tree / "web" / "vendor" / "plotly.LICENSE").unlink()
-    with pytest.raises(SystemExit, match="plotly.LICENSE is missing"):
+    with pytest.raises(SystemExit, match=r"plotly\.LICENSE is missing"):
         packed(module, tree)
 
 
