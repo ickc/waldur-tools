@@ -396,7 +396,7 @@ def figure_projects(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figur
             barmode="stack",
             height=520,
             title={
-                "text": "Which projects the usage came from, month by month",
+                "text": "Which projects the node hours came from, month by month",
                 "font": {"size": 16, "color": light("ink")},
             },
             yaxis={
@@ -428,7 +428,7 @@ def figure_projects(per_project: pl.DataFrame, totals: pl.DataFrame) -> go.Figur
                             "y": normalised,
                             "hovertemplate": "%{fullData.name}: %{y:,.1f}%<extra></extra>",
                         },
-                        {"yaxis.title.text": "% of that month's usage"},
+                        {"yaxis.title.text": "% of that month's node hours"},
                     ],
                 ],
             ),
@@ -1902,8 +1902,9 @@ def render(
     per_project = reports.monthly(source, nodes=nodes, share=share, customer=customer)
     if totals.is_empty():
         raise ValueError(
-            "No monthly usage rows. Either the snapshot predates any usage, or "
-            f"no project belongs to {customer!r} -- try customer=None."
+            "No monthly figures: neither an invoice nor a usage row. Either the "
+            f"snapshot predates both, or no project belongs to {customer!r} -- try "
+            "customer=None."
         )
 
     months = totals["month"].to_list()
@@ -1931,8 +1932,8 @@ def render(
             "machine is worth; the dotted line is what has actually been <em>awarded</em> to "
             "projects, at the rate their award periods imply. The distance between the two "
             "lines is share nobody has been given, and no amount of running harder reaches "
-            "it. Usage above the dotted line is projects spending their awards faster than "
-            "the award period assumed. The hatched column is the month the snapshot was "
+            "it. A column above the dotted line is projects spending their awards faster "
+            "than the award period assumed. The hatched column is the month the snapshot was "
             "taken in and is incomplete by construction.",
             _table(
                 totals,
@@ -2284,9 +2285,9 @@ def render(
 <p>Isambard&nbsp;3 has {nodes} compute nodes and our share of it is
 {share:.0%} — <strong>{held:,.1f} nodes, held for every hour of every month</strong>.
 That is {held * 24:,.0f} node hours a day, and roughly
-{held * 24 * 30:,.0f} a month. Every percentage on this page is usage measured
-against that, so 100% would mean we ran, on average, exactly the nodes we
-hold.</p>
+{held * 24 * 30:,.0f} a month. Every percentage on this page measures the node
+hours the portal billed us against that, so 100% would mean we ran, on average,
+exactly the nodes we hold.</p>
 
 <p>Nothing on the machine cuts us off. {best_month}
 Nor is the constraint a shortage of credit: we hold {credit_held:,.0f} node hours of it and
@@ -2304,15 +2305,27 @@ not enforced.</p>
 <section class="method" id="method">
 <h2>How to read these numbers</h2>
 <ul>
-<li><strong>The source is one endpoint.</strong> Every figure comes from
-<code>openportal-allocation-user-usage</code>, the only endpoint with a time
-axis: one row per user, allocation and calendar month. Nothing is smoothed,
-imputed or back-filled, and a month with no rows is a month with no usage.</li>
-<li><strong>Node hours are assumed.</strong> The portal calls the field
-<code>node_usage</code> and does not state a unit. This report reads it as node
-hours, which is what makes {held:,.1f} nodes &times; 24 h &times; days the right comparison.
-If it turns out to be node <em>days</em>, every percentage here is far too
-small — but the shape of every curve is unchanged.</li>
+<li><strong>Node hours come from the invoices.</strong> Each month's total is
+that month's invoice read line by line: the billed usage lines, already
+attributed to the project that ran them, summing to the
+<code>incurred_costs</code> the portal charged. It is used rather than
+<code>openportal-allocation-user-usage</code> because the portal drops a
+project's usage rows when its allocation ends — every month of them,
+retrospectively — while the invoice does not move. A report summed out of the
+usage endpoint shrinks every time a project finishes, and shrinks for months
+already past; this one does not.</li>
+<li><strong>The user counts come from the usage endpoint.</strong>
+<code>openportal-allocation-user-usage</code> is the only endpoint with both a
+time axis and a person on each row, so <em>active users</em> is built from it.
+For a project whose allocation has ended it holds no rows at all, so that
+project still contributes node hours but no longer any people — which is why
+those counts are labelled <em>at least</em>.</li>
+<li><strong>The unit is the invoice's.</strong> The billed usage lines state
+their measured unit as hours and price it at one credit each, so a node hour is
+what the portal itself is counting, not an assumption this report makes. That is
+what makes {held:,.1f} nodes &times; 24 h &times; days the right comparison. The usage
+endpoint's own <code>node_usage</code> field — shown beside each figure as the
+cross-check — states no unit and is read the same way.</li>
 <li><strong>Scope is {_esc(customer or "every project this token administers")}.</strong>
 The portal also shows us separately funded UKRI and other, separately funded projects;
 counting those in would inflate our own share.</li>

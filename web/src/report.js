@@ -296,11 +296,12 @@ function render() {
   draw('share', figureShare(totals, nodes, share, awarded));
   table('share', totals, [
     ['month', 'Month', 'month'],
-    ['node_hours', 'Node hours used', 'number'],
+    ['node_hours', 'Node hours billed', 'number'],
+    ['usage_node_hours', 'Node hours still in the usage table', 'number'],
     ['entitlement_node_hours', 'Share worth', 'number'],
     ['pct_of_entitlement', '% of share', 'number'],
     ['active_projects', 'Active projects'],
-    ['active_users', 'Active users'],
+    ['active_users', 'Active users (at least)'],
   ]);
 
   draw('projects', figureProjects(reports.rankedBands(perProject), totals));
