@@ -13,9 +13,9 @@ only some of the platforms would have this write a different five megabytes
 depending on where it ran.
 
 `plotly.min.js` carries only a one-line copyright and a bare "Licensed under the
-MIT license"; the MIT text itself is not in it. Clause of that licence asks that
-the notice travel with the code, and the release archive is a redistribution of
-it, so the full terms are written out beside the bundle -- from plotly's own
+MIT license"; the MIT text itself is not in it. That licence asks that its
+notice and permission text travel with every copy, and the release archive is a
+copy, so the full terms are written out beside the bundle -- from plotly's own
 packaged `LICENSE`, so the version cannot drift from the code it covers.
 
 Run `pixi run web-vendor` once after cloning, and again after changing the
