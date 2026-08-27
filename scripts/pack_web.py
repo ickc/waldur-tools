@@ -66,6 +66,12 @@ def main() -> None:
             entry = zipfile.ZipInfo(path.relative_to(WEB).as_posix(), date_time=EPOCH)
             entry.compress_type = zipfile.ZIP_DEFLATED
             entry.external_attr = 0o644 << 16
+            # ZipInfo takes this from whatever host it is constructed on -- 0
+            # on Windows, 3 (unix) everywhere else -- and writes it into every
+            # central-directory entry, so the same source would otherwise pack
+            # into two different archives. 3 is also what makes the permission
+            # bits set above mean anything to a reader.
+            entry.create_system = 3
             archive.writestr(entry, path.read_bytes())
 
     print(f"wrote {out.relative_to(ROOT)} ({out.stat().st_size / 1e6:.1f} MB)")

@@ -1148,12 +1148,14 @@ reports agree on what the sentence looks like.
 
 **A generated file must come out the same bytes wherever it was generated.**
 Both golden files under `web/tests/` and the vendored plotly bundle are written
-with an explicit `newline="\n"` rather than Python's platform default, entry
+with an explicit `newline="\n"` rather than Python's platform default; entry
 names in the release archive are `as_posix()` because the zip format says so and
-Chrome would read a backslash as part of a file name, and `.gitattributes` pins
-the checkout to LF so that none of it depends on which machine cloned the
-repository. The claim that two builds of the extension can be compared is only
-true if all of that holds.
+Chrome would read a backslash as part of a file name, and each entry's
+`create_system` is written rather than inherited, because `ZipInfo` takes it
+from the host — 0 on Windows, 3 everywhere else — into a field nobody reads and
+every byte counts; and `.gitattributes` pins the checkout to LF so that none of
+it depends on which machine cloned the repository. The claim that two builds of
+the extension can be compared is only true if all of that holds.
 
 ## Releasing the extension
 
