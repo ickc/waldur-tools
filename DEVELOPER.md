@@ -1154,8 +1154,16 @@ Chrome would read a backslash as part of a file name, and each entry's
 `create_system` is written rather than inherited, because `ZipInfo` takes it
 from the host — 0 on Windows, 3 everywhere else — into a field nobody reads and
 every byte counts; and `.gitattributes` pins the checkout to LF so that none of
-it depends on which machine cloned the repository. The claim that two builds of
-the extension can be compared is only true if all of that holds.
+it depends on which machine cloned the repository.
+
+The bundle is `get_plotlyjs()` out of the *installed* plotly, so this also asks
+that `pixi.lock` resolve one plotly version for all five platforms. A solve that
+touches only some of them can leave the rest behind — adding the two new
+platforms did exactly that, and for a while two of the five would have vendored
+a different major version of plotly.js than the other three. Nothing checks
+this; `pixi update <package>` re-solves every platform together, which is what
+keeps it true. The claim that two builds of the extension can be compared is
+only true if all of that holds.
 
 ## Releasing the extension
 

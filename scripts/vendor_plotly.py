@@ -7,6 +7,11 @@ minified code does not belong in this repository's history, and taking it from
 `plotly.offline.get_plotlyjs()` pins it to the very bundle `waldur-tools viz`
 inlines, so the two reports cannot drift onto different plotly versions.
 
+That pins them to each other on one machine. What pins them across machines is
+`pixi.lock` resolving the same plotly for every platform -- a solve that reaches
+only some of the platforms would have this write a different five megabytes
+depending on where it ran.
+
 Run `pixi run web-vendor` once after cloning, and again after changing the
 plotly pin.
 """
