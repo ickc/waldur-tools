@@ -1,3 +1,7 @@
+This tag releases the whole repository — the package and the browser
+extension, which are kept at the same version. The asset below is the
+extension, for people who will never install the package.
+
 **Chrome cannot install a downloaded zip directly.** Unpack it and load the
 folder:
 

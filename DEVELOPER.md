@@ -1165,29 +1165,33 @@ this; `pixi update <package>` re-solves every platform together, which is what
 keeps it true. The claim that two builds of the extension can be compared is
 only true if all of that holds.
 
-## Releasing the extension
+## Releasing
 
-The extension ships as a zip on a GitHub release, built by
-`.github/workflows/release.yml` when a `web-v*` tag is pushed.
+One tag releases the whole repository, and the extension's zip rides on it as
+the asset. `.github/workflows/release.yml` builds it when a `v*` tag is pushed.
 
 ```bash
-# edit "version" in web/manifest.json, commit it
-git tag web-v0.3.0
-git push origin web-v0.3.0
+# set the same number in all three, commit it
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-The tag is prefixed because this repository has two shippable things, and an
-unprefixed `v0.3.0` would silently claim to release the Python package too. The
-prefix says *which artefact*, not which version line: the two are deliberately
-kept at the same number. `web/manifest.json`, the `version` in `pyproject.toml`
-and `waldur_tools.__version__` move together, even when a release only changed
-one side. One number describing the whole repository is easier to hold in your
-head than two that drift, and the cost is an occasional bump that means nothing
-on one of them.
+The tag is unprefixed because there is one version line, not two. This
+repository has two shippable things — the package and the extension — and they
+are deliberately kept at the same number: `web/manifest.json`, the `version` in
+`pyproject.toml` and `waldur_tools.__version__` move together, even when a
+release only changed one side. One number describing the whole repository is
+easier to hold in your head than two that drift, and the cost is an occasional
+bump that means nothing on one of them. Releases up to 0.2.0 were tagged
+`web-v*`, from when the prefix was saying *which artefact* was shipping; once
+the two numbers were held in step, the prefix was only naming a distinction the
+versioning had stopped making.
 
-`web/manifest.json` is the only place the extension's version is written down.
-The workflow reads it, refuses a tag that disagrees, and names the asset from
-it — so the archive's name and the version the extension reports about itself
+Three files write that number down, so the workflow reads all three and refuses
+a tag that disagrees with any of them — reporting every mismatch rather than
+the first, so one push tells you everything left to fix. The asset is named
+from `web/manifest.json`, which is the only place the *extension's* version
+lives: the archive's name and the version the extension reports about itself
 cannot come apart. A tag can be pushed at a commit that never went through CI,
 so the workflow runs `pixi run check` in full before it packs anything.
 

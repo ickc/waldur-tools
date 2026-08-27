@@ -1,12 +1,13 @@
-name: Release the extension
+name: Release
 
-# The repository holds two shippable things -- this package and the browser
-# extension -- so the extension's tags are prefixed and `v*` stays free for the
-# package. The two are kept at the same version number and bumped together, so
-# the prefix says which artefact is being released, not which version line.
+# One tag releases the whole repository. This package and the browser extension
+# are two shippable things kept deliberately at the same version number, so a
+# single unprefixed `v*` tag names that one number rather than pretending the
+# two ship on their own schedules. The extension's zip is the asset; the
+# package is released by the tag itself.
 on:
   push:
-    tags: ["web-v*"]
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -17,17 +18,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Before anything slow. `manifest.json` is the only place the version is
-      # written down, and a tag that disagrees with it would publish an asset
-      # whose name and whose extension report different versions.
-      - name: The tag has to name the version in the manifest
+      # Before anything slow. The version is written down in three places that
+      # are meant to move together, and a tag that disagrees with any of them
+      # would publish an asset whose name and whose contents report different
+      # versions. Every mismatch is reported, not just the first, so one push
+      # tells you everything left to fix.
+      - name: The tag has to name the version everywhere it is written
         run: |
+          tag=${GITHUB_REF_NAME#v}
           manifest=$(jq -r .version web/manifest.json)
-          tag=${GITHUB_REF_NAME#web-v}
-          if [ "$manifest" != "$tag" ]; then
-            echo "::error::tag $GITHUB_REF_NAME says $tag, web/manifest.json says $manifest"
-            exit 1
-          fi
+          pyproject=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          dunder=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/waldur_tools/__init__.py)
+          status=0
+          for pair in "web/manifest.json:$manifest" "pyproject.toml:$pyproject" "src/waldur_tools/__init__.py:$dunder"; do
+            if [ "${pair#*:}" != "$tag" ]; then
+              echo "::error::tag $GITHUB_REF_NAME says $tag, ${pair%%:*} says ${pair#*:}"
+              status=1
+            fi
+          done
+          exit $status
 
       - uses: prefix-dev/setup-pixi@v0.8.1
         with:
@@ -52,6 +61,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.zip \
             --verify-tag \
-            --title "Isambard 3 utilisation ${GITHUB_REF_NAME#web-}" \
+            --title "waldur-tools $GITHUB_REF_NAME" \
             --notes "$(cat .github/install-notes.md)" \
             --generate-notes
