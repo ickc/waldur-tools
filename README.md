@@ -133,6 +133,7 @@ You need [pixi](https://pixi.sh). Nothing else — not even direnv.
 ```bash
 pixi install
 echo 'export WALDUR_API_TOKEN=<your token>' > .envrc.local   # gitignored
+chmod 600 .envrc.local                                       # see below
 pixi run waldur-tools whoami
 ```
 
@@ -140,6 +141,21 @@ The token comes from the portal, under your own account menu. `.envrc.local` is
 gitignored and never committed; `scripts/activate.sh` (committed, secret-free)
 sources it on every `pixi run` and `pixi shell`, along with sensible defaults
 for `WALDUR_API_URL` and `WALDUR_CACHE_DIR`.
+
+**The `chmod` matters on a shared machine.** The usual umask leaves a new file
+readable by every other account on the box, and this one holds the whole of
+your access to the portal. Nothing here can set it for you — the file is yours,
+written by hand, and quietly changing the mode of a file we did not create is
+not ours to do — so a command that finds it readable by others prints a warning
+and carries on. The same goes for `~/.config/waldur/token` and anything
+`WALDUR_TOKEN_FILE` points at.
+
+**What the tool writes, it locks itself.** Snapshots (directory `0700`, files
+`0600`), the SLURM job capture, exports from `-o`, and the generated
+`utilisation.html` are all narrowed to their owner after writing — they carry
+an organisation's spend, project names and who ran what, and on a shared login
+node the default `0644` publishes that to everyone with an account. On Windows
+`chmod` cannot express this and the calls are no-ops.
 
 Windows works the same way from the outside. `scripts/activate.bat` sets those
 defaults there, and since cmd.exe cannot source a shell file, the token is read

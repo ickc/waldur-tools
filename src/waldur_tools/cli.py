@@ -17,7 +17,7 @@ from . import slurm as slurm_module
 from . import viz as viz_report
 from .cache import DEFAULT_ENDPOINTS, Snapshot, SnapshotError, available, pull
 from .client import WaldurClient, WaldurError
-from .config import MissingTokenError, Settings
+from .config import PRIVATE_DIR, MissingTokenError, Settings, restrict
 from .reports import (
     DEFAULT_CUSTOMER,
     DEFAULT_SHARE,
@@ -92,12 +92,19 @@ def _size(value: object) -> str:
 
 
 def _write(frame: pl.DataFrame, output: Path) -> None:
+    """Write a report where the reader asked for it, readable only by them.
+
+    Every report here carries the same figures the snapshot does -- spend,
+    project names, who ran what -- so an exported CSV is no less private than
+    the cache it came out of, and `-o` most often points somewhere shared.
+    """
     if output.suffix == ".parquet":
         frame.write_parquet(output)
     elif output.suffix == ".json":
         frame.write_json(output)
     else:
         frame.write_csv(output)
+    restrict(output)
     console.print(f"[green]Wrote {frame.height} rows to {output}[/]")
 
 
@@ -206,7 +213,9 @@ def slurm_jobs(
     frame = slurm_module.capture(codes, start=since, cluster=cluster)
     target = output or (directory / slurm_module.JOBS_FILENAME)
     target.parent.mkdir(parents=True, exist_ok=True)
+    restrict(target.parent, PRIVATE_DIR)
     frame.write_parquet(target)
+    restrict(target)
 
     first, last = (
         frame.select(
@@ -324,7 +333,11 @@ def viz(
             source, nodes=nodes, share=share, customer=customer or None, jobs=frame
         )
 
+    # The finished report is the most concentrated thing this writes: every
+    # figure, every project name and every headline in one file, and it lands
+    # in the working directory by default.
     output.write_text(page, encoding="utf-8")
+    restrict(output)
     console.print(
         f"[green]Wrote {output}[/] ({len(page) / 1_048_576:.1f} MB) — open it in a browser"
     )

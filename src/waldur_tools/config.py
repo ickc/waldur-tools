@@ -2,13 +2,75 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import platformdirs
 
 DEFAULT_API_URL = "https://portal-api.isambard.ac.uk"
+
+#: Mode for every file this package writes. Snapshots hold a whole
+#: organisation's spend and project names, the generated report holds the same
+#: figures rendered, and a token file holds the credential itself -- none of it
+#: is ours to publish to everyone with an account on a shared login node, which
+#: is what the usual 0644 does on a multi-user HPC filesystem.
+PRIVATE_FILE = 0o600
+
+#: The same for a directory this package creates. 0700 rather than 0600: a
+#: directory needs the execute bit to be opened at all.
+PRIVATE_DIR = 0o700
+
+#: The bits that make a path readable by somebody other than its owner.
+_OTHERS_READ = stat.S_IRWXG | stat.S_IRWXO
+
+
+def restrict(path: Path, mode: int = PRIVATE_FILE) -> Path:
+    """Narrow a path to its owner, and hand it back.
+
+    Called after writing rather than before, because the mode has to be
+    corrected on a file that already existed as well as set on a new one, and
+    ``umask`` can only do the second. A ``chmod`` after the write does both.
+
+    **Not a substitute for the directory being private.** Anything already
+    holding a copy -- a file replaced in place, an editor's backup -- is
+    untouched, and this only ever narrows the file it is handed.
+
+    Failure is ignored. On Windows ``chmod`` cannot express this at all (it
+    toggles the read-only bit and nothing else), and on a filesystem that
+    refuses the call the write itself has already succeeded -- losing a
+    finished snapshot over the permissions on it would be the worse outcome.
+    Nothing here is the security boundary; the directory the file lands in is.
+    """
+    with contextlib.suppress(OSError):
+        path.chmod(mode)
+    return path
+
+
+def _warn_if_readable(path: Path, what: str) -> None:
+    """Say so, once, when a file holding the token is readable by anyone else.
+
+    This cannot be enforced the way :func:`restrict` enforces our own output:
+    these files are written by hand, by the person whose token it is, and
+    silently changing the mode of a file we did not create -- one that may be
+    deliberately shared, or may be a symlink into somewhere else -- is not ours
+    to do. So it is said out loud and left to them.
+    """
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if mode & _OTHERS_READ:
+        warnings.warn(
+            f"{path} is readable by other users (mode {stat.filemode(mode)}) and holds "
+            f"{what}. On a shared login node that is the whole of the protection on it. "
+            f"Fix with: chmod 600 {path}",
+            stacklevel=3,
+        )
+
 
 _TOKEN_HELP = """\
 No Waldur API token found.
@@ -19,6 +81,12 @@ Windows, where cmd.exe cannot source a shell file, this module reads the token
 out of it directly:
 
     echo 'export WALDUR_API_TOKEN=<your token>' > .envrc.local
+    chmod 600 .envrc.local
+
+That chmod is not decoration on a shared login node: the default umask leaves
+the file world-readable, and the token is the whole of your access to the
+portal. Nothing here can set it for you -- the file is yours and is written by
+hand -- so a command that finds it readable by others says so and carries on.
 
 Alternatively point WALDUR_TOKEN_FILE at a file containing just the token, or
 place it in ~/.config/waldur/token. The token is issued by the portal under
@@ -42,6 +110,8 @@ def _read_token_file(path: Path) -> str | None:
         token = path.read_text(encoding="utf-8").strip()
     except OSError:
         return None
+    if token:
+        _warn_if_readable(path, "the API token")
     return token or None
 
 
@@ -68,6 +138,8 @@ def _token_from_envrc(path: Path) -> str | None:
         name, sep, value = line.strip().removeprefix("export ").partition("=")
         if sep and name.strip() == "WALDUR_API_TOKEN":
             found = value.strip().strip("\"'") or None
+    if found:
+        _warn_if_readable(path, "the API token")
     return found
 
 

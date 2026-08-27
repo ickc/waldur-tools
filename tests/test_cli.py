@@ -9,13 +9,17 @@ dropped filter costs a run and fixes nothing.
 
 from __future__ import annotations
 
+import stat
+import sys
+
+import polars as pl
 import pytest
 from rich.console import Console
 
 from waldur_tools import cli
 from waldur_tools.cache import SnapshotError
 from waldur_tools.client import WaldurError
-from waldur_tools.config import MissingTokenError
+from waldur_tools.config import PRIVATE_FILE, MissingTokenError
 
 
 @pytest.fixture
@@ -77,3 +81,22 @@ def test_an_argument_with_a_space_comes_back_quoted(cli_run):
         argv=("waldur-tools", "report", "--customer", "Some Organisation"),
     )
     assert "waldur-tools report --customer 'Some Organisation'" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod is a no-op on Windows")
+@pytest.mark.parametrize("name", ["report.csv", "report.json", "report.parquet"])
+def test_an_exported_report_is_readable_only_by_its_author(tmp_path, name):
+    """`-o` carries the same figures the snapshot does, and often points somewhere shared."""
+    target = tmp_path / name
+    cli._write(pl.DataFrame({"project_code": ["abc1"], "node_hours": [10.0]}), target)
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod is a no-op on Windows")
+def test_an_export_over_a_world_readable_file_narrows_it(tmp_path):
+    """Writing into a path that already existed must not inherit its mode."""
+    target = tmp_path / "report.csv"
+    target.write_text("stale")
+    target.chmod(0o644)
+    cli._write(pl.DataFrame({"project_code": ["abc1"]}), target)
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE

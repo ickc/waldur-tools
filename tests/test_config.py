@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 import re
+import stat
+import sys
 
 import pytest
 
-from waldur_tools.config import MissingTokenError, Settings, resolve_token
+from waldur_tools.config import (
+    PRIVATE_FILE,
+    MissingTokenError,
+    Settings,
+    resolve_token,
+    restrict,
+)
+
+# Every token file below is written by hand in the test, so it inherits the
+# runner's umask and would warn. The warning is asserted on in its own test.
+pytestmark = pytest.mark.filterwarnings("ignore:.*readable by other users.*")
+
+#: `chmod` on Windows toggles the read-only bit and can express nothing else,
+#: so the modes below are a POSIX claim and are skipped rather than relaxed.
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="chmod is a no-op on Windows")
 
 
 def test_env_token_wins(monkeypatch, tmp_path):
@@ -85,3 +101,72 @@ def test_from_env_reads_cache_dir(monkeypatch, tmp_path):
     settings = Settings.from_env()
     assert settings.cache_dir == tmp_path / "snaps"
     assert settings.api_url == "https://example.test"
+
+
+# -- permissions -------------------------------------------------------------
+
+
+@posix_only
+def test_restrict_narrows_a_file_to_its_owner(tmp_path):
+    target = tmp_path / "snapshot.parquet"
+    target.write_text("x")
+    target.chmod(0o644)
+    assert restrict(target) is target
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE
+
+
+@posix_only
+def test_restrict_fixes_a_file_that_already_existed(tmp_path):
+    """A `umask` can only narrow a file being created; this has to narrow both."""
+    target = tmp_path / "utilisation.html"
+    target.write_text("old")
+    target.chmod(0o666)
+    target.write_text("new")
+    restrict(target)
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE
+
+
+def test_restrict_does_not_raise_on_a_path_it_cannot_change(tmp_path):
+    """The write has already succeeded; losing it over the mode would be worse."""
+    assert restrict(tmp_path / "not-there") == tmp_path / "not-there"
+
+
+@posix_only
+def test_a_world_readable_token_file_is_reported_rather_than_changed(monkeypatch, tmp_path):
+    """It is not ours to chmod -- we did not write it -- so it is said out loud."""
+    token_file = tmp_path / "token"
+    token_file.write_text("from-file")
+    token_file.chmod(0o644)
+    monkeypatch.delenv("WALDUR_API_TOKEN", raising=False)
+    monkeypatch.setenv("WALDUR_TOKEN_FILE", str(token_file))
+
+    with pytest.warns(UserWarning, match="readable by other users"):
+        assert resolve_token() == "from-file"
+    # Reported, not corrected: the file stays exactly as its owner left it.
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o644
+
+
+@posix_only
+def test_a_private_token_file_says_nothing(monkeypatch, tmp_path, recwarn):
+    token_file = tmp_path / "token"
+    token_file.write_text("from-file")
+    token_file.chmod(0o600)
+    monkeypatch.delenv("WALDUR_API_TOKEN", raising=False)
+    monkeypatch.setenv("WALDUR_TOKEN_FILE", str(token_file))
+
+    assert resolve_token() == "from-file"
+    assert not [w for w in recwarn if "readable by other users" in str(w.message)]
+
+
+@posix_only
+def test_an_envrc_local_anyone_can_read_is_reported_too(monkeypatch, tmp_path):
+    """The documented workflow's own file, and the one nothing can enforce."""
+    envrc = tmp_path / ".envrc.local"
+    envrc.write_text("export WALDUR_API_TOKEN=from-envrc\n", encoding="utf-8")
+    envrc.chmod(0o644)
+    monkeypatch.delenv("WALDUR_API_TOKEN", raising=False)
+    monkeypatch.delenv("WALDUR_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("PIXI_PROJECT_ROOT", str(tmp_path))
+
+    with pytest.warns(UserWarning, match=re.escape("chmod 600")):
+        assert resolve_token() == "from-envrc"
