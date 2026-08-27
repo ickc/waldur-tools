@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Five runners go out per push, so a branch that is pushed to twice in a minute
+# is holding ten of them for one answer. The superseded run is cancelled -- but
+# only on a pull request, where the last push is the only one anybody reads. A
+# run on `main` is the record of whether that commit was healthy on every
+# platform, and the next push does not make the previous commit's answer moot.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     # One runner per platform in `tool.pixi.workspace.platforms`: a platform
