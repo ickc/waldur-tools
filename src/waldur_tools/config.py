@@ -181,6 +181,10 @@ class InsecureApiUrlError(ValueError):
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
 
 
+#: The port each scheme is already speaking on when the URL does not say.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 def origin_of(url: str) -> str:
     """``scheme://host[:port]``, lowercased -- the identity a token is scoped to.
 
@@ -188,9 +192,28 @@ def origin_of(url: str) -> str:
     credentials in the URL are deliberately not part of it: what decides
     whether the ``Authorization`` header may be attached is who is going to
     receive it, and that is the scheme, the host and the port.
+
+    Built from ``hostname`` and the port rather than from ``netloc``, because
+    ``netloc`` is the authority as written and not the origin it denotes. It
+    keeps any ``user:password@`` -- which this is documented not to include and
+    which would make one deployment look like two -- and it keeps a port that
+    was only ever the scheme's default, so ``https://host:443`` and
+    ``https://host`` would compare unequal and a redirect or a ``Link`` header
+    that spelled one of them out would be refused. This is what the browser's
+    ``URL.origin`` does, and what ``web/src/api.js`` gets for free from it.
     """
     parts = urlsplit(url)
-    return f"{parts.scheme.lower()}://{(parts.netloc or '').lower()}"
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if ":" in host:  # IPv6, which `hostname` hands back without its brackets.
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:  # Not a number, so not a port this could ever reach.
+        return f"{scheme}://{parts.netloc.lower()}"
+    if port is None or port == _DEFAULT_PORTS.get(scheme):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
 
 
 @dataclass(frozen=True, slots=True)

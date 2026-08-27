@@ -189,6 +189,29 @@ def test_origin_ignores_everything_a_token_is_not_scoped_to():
     assert origin_of("https://portal.example.test") != origin_of("https://portal.example.test:8443")
 
 
+def test_the_scheme_s_own_port_is_the_same_origin_as_leaving_it_out():
+    """`https://host:443` is `https://host` -- a redirect may spell either."""
+    assert origin_of("https://portal.example.test:443/api/") == "https://portal.example.test"
+    assert origin_of("http://localhost:80/api/") == "http://localhost"
+    assert origin_of("https://portal.example.test:80/") == "https://portal.example.test:80"
+
+
+def test_credentials_in_the_url_are_not_part_of_the_origin():
+    """Two spellings of one deployment must not read as two deployments."""
+    assert origin_of("https://someone:secret@portal.example.test/api/") == (
+        "https://portal.example.test"
+    )
+    assert origin_of("https://someone@portal.example.test/api/") == (
+        origin_of("https://portal.example.test/api/")
+    )
+
+
+def test_an_ipv6_host_keeps_its_brackets():
+    """`hostname` strips them; an origin without them is not a URL you can rejoin."""
+    assert origin_of("https://[::1]:8443/api/") == "https://[::1]:8443"
+    assert origin_of("https://[::1]:443/api/") == "https://[::1]"
+
+
 def test_plain_http_to_a_remote_portal_is_refused(tmp_path):
     """The token is a bearer credential; http:// puts it on the wire in clear."""
     with pytest.raises(InsecureApiUrlError, match="plain HTTP"):
