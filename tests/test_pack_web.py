@@ -34,19 +34,30 @@ def load():
 
 @pytest.fixture
 def tree(tmp_path):
-    """A repository shaped like this one, small enough to assert on whole."""
+    """A repository shaped like this one, small enough to assert on whole.
+
+    Written with `newline="\n"` throughout, because the real repository's
+    `.gitattributes` is `* text=auto eol=lf` and so hands every platform a
+    working tree with LF in it -- which is what keeps the archive reproducible
+    across machines. Letting the platform translate here would model a checkout
+    this project does not have, and the assertions below are on bytes.
+    """
     web = tmp_path / "web"
     (web / "src").mkdir(parents=True)
     (web / "vendor").mkdir()
-    (web / "manifest.json").write_text(json.dumps({"version": "9.9.9"}), encoding="utf-8")
-    (web / "README.md").write_text("readme", encoding="utf-8")
-    (web / "src" / "report.js").write_text("// code", encoding="utf-8")
-    (web / "vendor" / "plotly.min.js").write_text("// plotly", encoding="utf-8")
+
+    def write(path, text):
+        path.write_text(text, encoding="utf-8", newline="\n")
+
+    write(web / "manifest.json", json.dumps({"version": "9.9.9"}))
+    write(web / "README.md", "readme\n")
+    write(web / "src" / "report.js", "// code\n")
+    write(web / "vendor" / "plotly.min.js", "// plotly\n")
     # Developer scaffolding, which must stay out of the archive.
     (web / "tests").mkdir()
-    (web / "tests" / "parity.test.mjs").write_text("// tests", encoding="utf-8")
-    (web / "package.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "LICENSE").write_text("BSD 3-Clause License\n", encoding="utf-8")
+    write(web / "tests" / "parity.test.mjs", "// tests\n")
+    write(web / "package.json", "{}\n")
+    write(tmp_path / "LICENSE", "BSD 3-Clause License\n")
     return tmp_path
 
 
