@@ -574,5 +574,10 @@ def test_quota_figures_are_absent_rather_than_empty(tmp_path, allocations):
 def test_the_page_says_so_when_the_readings_have_gone_stale(snapshot):
     """The columns simply stop, and nothing else on the page would say why."""
     current = reports.storage(snapshot)
-    assert "readings stop on" in viz._storage_staleness(current)
+    sentence = viz._storage_staleness(current)
+    assert "readings stop on" in sentence
+    # An unpadded day, spelled without the `%-d` that only glibc understands,
+    # and written the way `web/src/page.js` writes the same sentence.
+    read = current["date"].max()
+    assert f"stop on {read.day} {read:%B %Y}" in sentence
     assert viz._storage_staleness(current.head(0)) == ""
