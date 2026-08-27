@@ -1115,7 +1115,7 @@ geometry, and `tests/test_viz.py` pins it the same way.
 `tool.pixi.workspace.platforms` names five, and `.github/workflows/ci.yml` runs
 the whole check on one runner for each of them — `ubuntu-latest` for linux-64,
 `ubuntu-24.04-arm` for linux-aarch64, `macos-latest` for osx-arm64,
-`macos-15-intel` for osx-64 and `windows-latest` for win-64. A platform that is
+`macos-26-intel` for osx-64 and `windows-latest` for win-64. A platform that is
 solved for but never run on is a claim rather than a fact. The matrix does not
 stop at the first failure, because which of them are healthy is the question it
 is being asked, and every step in it is a `pixi run <task>` — the runners do not

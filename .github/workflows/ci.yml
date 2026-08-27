@@ -21,8 +21,11 @@ jobs:
     #   ubuntu-latest    linux-64
     #   ubuntu-24.04-arm linux-aarch64
     #   macos-latest     osx-arm64
-    #   macos-15-intel   osx-64
+    #   macos-26-intel   osx-64
     #   windows-latest   win-64
+    # Two of them carry a version because GitHub publishes no `-latest` alias
+    # for arm Linux or for Intel macOS; those two name the newest image that is
+    # out of preview, and have to be moved by hand when a newer one ships.
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -34,7 +37,7 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - macos-latest
-          - macos-15-intel
+          - macos-26-intel
           - windows-latest
 
     steps:
