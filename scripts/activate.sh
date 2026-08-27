@@ -1,7 +1,8 @@
 # shellcheck shell=sh
 #
-# Sourced by pixi on every `pixi run` and `pixi shell`. Safe to commit: it
-# contains no secrets, it only says where to find them.
+# Sourced by pixi on every `pixi run` and `pixi shell`, on every platform but
+# Windows, which gets scripts/activate.bat. Safe to commit: it contains no
+# secrets, it only says where to find them.
 #
 # The token itself lives in .envrc.local, which is gitignored and never
 # committed. Create it with:

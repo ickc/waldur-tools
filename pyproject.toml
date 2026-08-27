@@ -67,10 +67,17 @@ mypy = ">=1.10"
 ruff = ">=0.6"
 respx = ">=0.21"
 
-# Runs on every `pixi run` and `pixi shell`, and is where the API token comes
-# from -- so pixi on its own is enough to use this tool. direnv is optional.
-[tool.pixi.activation]
+# Runs on every `pixi run` and `pixi shell`, and is where the cache directory
+# and the API URL come from -- so pixi on its own is enough to use this tool.
+# direnv is optional. An activation script is a shell script, and Windows does
+# not have the same shell, so there are two of them; they set the same
+# variables, and the token is read out of .envrc.local by waldur_tools.config
+# on the platform whose shell cannot source it.
+[tool.pixi.target.unix.activation]
 scripts = ["scripts/activate.sh"]
+
+[tool.pixi.target.win-64.activation]
+scripts = ["scripts/activate.bat"]
 
 [tool.pixi.tasks]
 cli = "waldur-tools"
