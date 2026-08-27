@@ -23,11 +23,15 @@ def snapshot(
     users,
     projects,
     customers,
+    invoices,
 ):
     snap = Snapshot.create(tmp_path, "test")
     snap.write("users", to_frame(users))
     snap.write("customers", to_frame(customers))
     snap.write("projects", to_frame(projects))
+    # The headline series is the ledger's, so the report has to be rendered
+    # against a snapshot that has one -- see `reports.monthly_totals`.
+    snap.write("invoices", to_frame(invoices))
     snap.write("openportal-allocations", to_frame(allocations))
     snap.write("openportal-associations", to_frame(associations))
     snap.write("openportal-accounting-summary", to_frame(accounting_summary))

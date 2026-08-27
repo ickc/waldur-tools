@@ -215,6 +215,91 @@ def test_monthly_customer_filter_can_exclude_everything(snapshot):
     assert reports.monthly(snapshot, customer="No Such Organisation").is_empty()
 
 
+def test_monthly_totals_reports_the_ledger_not_the_usage_endpoint(snapshot):
+    """February billed 7.5 node hours; the usage endpoint can only reach 3.5.
+
+    The difference is Project Z, whose allocation has ended and whose usage rows
+    the portal no longer returns. Reporting the usage sum would understate the
+    month by more than half, and would keep understating it: the figure shrinks
+    every time a project finishes, retrospectively.
+    """
+    february = (
+        reports.monthly_totals(snapshot, customer="UKRI")
+        .filter(pl.col("month") == date(2026, 2, 1))
+        .row(0, named=True)
+    )
+    assert february["node_hours"] == pytest.approx(7.5)
+    assert february["usage_node_hours"] == pytest.approx(3.5)
+    assert february["node_hours_source"] == "invoice"
+    assert february["projects_without_usage"] == 1
+
+
+def test_monthly_totals_counts_a_billed_project_as_active(snapshot):
+    """Three projects ran in February; only two still have usage rows."""
+    february = (
+        reports.monthly_totals(snapshot, customer="UKRI")
+        .filter(pl.col("month") == date(2026, 2, 1))
+        .row(0, named=True)
+    )
+    assert february["active_projects"] == 3
+    # The invoice has no user axis, so this is a floor and the report says so.
+    assert february["active_users"] == 2
+    assert february["projects_with_usage_rows"] == 2
+
+
+def test_monthly_keeps_the_ended_project_with_no_user_count(snapshot):
+    """Its node hours are known exactly; how many people ran them is not."""
+    zed = (
+        reports.monthly(snapshot, customer="UKRI")
+        .filter(pl.col("project_name") == "Project Z")
+        .row(0, named=True)
+    )
+    assert zed["node_hours"] == pytest.approx(4.0)
+    assert zed["usage_node_hours"] is None
+    # Null rather than zero: a zero would claim nobody ran it, which is false.
+    assert zed["active_users"] is None
+
+
+def test_monthly_falls_back_to_usage_in_a_month_with_no_invoice(tmp_path, allocations):
+    """No ledger to read is not the same as a ledger reading zero."""
+    rows = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "500.0",
+            "year": 2026,
+            "month": 4,
+        }
+    ]
+    snap = reconciling(tmp_path, "uninvoiced-totals", allocations, rows, [])
+    row = reports.monthly_totals(snap, customer="UKRI").row(0, named=True)
+    assert row["node_hours"] == pytest.approx(500.0)
+    assert row["node_hours_source"] == "usage"
+
+
+def test_monthly_totals_still_report_without_an_invoices_endpoint(tmp_path, allocations):
+    """A snapshot pulled without `invoices` degrades to usage, and says it did."""
+    rows = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "12.0",
+            "year": 2026,
+            "month": 4,
+        }
+    ]
+    snap = Snapshot.create(tmp_path, "no-invoices")
+    snap.write("openportal-allocations", to_frame(allocations))
+    snap.write("openportal-allocation-user-usage", to_frame(rows))
+    snap.write_meta({})
+
+    row = reports.monthly_totals(snap, customer="UKRI").row(0, named=True)
+    assert row["node_hours"] == pytest.approx(12.0)
+    assert row["node_hours_source"] == "usage"
+
+
 def test_monthly_marks_only_the_snapshot_month_as_partial(snapshot, monkeypatch):
     """A snapshot taken mid-month holds a partial month; nothing else is."""
     snapshot.write_meta({})  # written now, so "today" is the partial month
@@ -251,20 +336,64 @@ def test_reconcile_agrees_when_the_pull_is_clean(snapshot):
     assert january["incurred_costs"] == pytest.approx(1.5)
     assert january["difference"] == pytest.approx(0.0)
     assert january["status"] == "ok"
-    assert by_month[date(2026, 2, 1)]["status"] == "ok"
     assert by_month[date(2026, 2, 1)]["invoice_state"] == "pending"
+
+
+def test_reconcile_names_a_terminated_project_rather_than_blaming_the_pull(snapshot):
+    """The gap the fixture's Project Z leaves is diagnosed, not called a defect.
+
+    Its allocation is gone, so the portal returns none of its usage rows -- not
+    the months since it ended, the whole history -- while its invoice stands.
+    That is a shortfall on the usage side of exactly what it was billed, and
+    saying "usage low" about it would send someone to re-pull a snapshot that
+    is already correct.
+    """
+    february = (
+        reports.reconcile(snapshot, customer="UKRI")
+        .filter(pl.col("month") == date(2026, 2, 1))
+        .row(0, named=True)
+    )
+    assert february["status"] == "project ended"
+    assert february["missing_projects"] == 1
+    assert february["missing_node_hours"] == pytest.approx(4.0)
+    assert february["difference"] == pytest.approx(-4.0)
+
+
+def test_reconcile_checks_the_invoice_lines_against_the_invoice_header(snapshot):
+    """`monthly_totals` reads the lines, so the lines have to add up to the header."""
+    frame = reports.reconcile(snapshot, customer="UKRI")
+    assert frame["items_difference"].to_list() == pytest.approx([0.0, 0.0])
+    assert frame["billed_node_hours"].to_list() == pytest.approx([1.5, 7.5])
 
 
 def test_reconcile_reads_incurred_costs_not_the_zeroed_total(snapshot):
     """`price` and `total` are net of a credit line; only `incurred_costs` bills."""
-    assert reports.invoiced(snapshot, customer="UKRI")["incurred_costs"].sum() == pytest.approx(5.0)
+    assert reports.invoiced(snapshot, customer="UKRI")["incurred_costs"].sum() == pytest.approx(9.0)
+
+
+def test_invoiced_projects_ignores_the_credit_line(snapshot):
+    """A large negative unit price on a blank unit is not node hours."""
+    frame = reports.invoiced_projects(snapshot, customer="UKRI")
+    assert frame["node_hours"].sum() == pytest.approx(9.0)
+    assert frame["node_hours"].min() > 0
+
+
+def test_invoiced_projects_keeps_a_project_that_has_no_allocation_left(snapshot):
+    """Project Z is on the invoice and nowhere else; the ledger still names it."""
+    february = reports.invoiced_projects(snapshot, customer="UKRI").filter(
+        pl.col("month") == date(2026, 2, 1)
+    )
+    zed = february.filter(pl.col("project_name") == "Project Z").row(0, named=True)
+    assert zed["node_hours"] == pytest.approx(4.0)
+    # No allocation, so `in_scope` has no code for it -- which is the signal.
+    assert zed["project_code"] is None
 
 
 def test_reconcile_leaves_out_another_organisations_invoice(snapshot):
     """Carol's 99.0 belongs to an invoice that is not ours, and must not net off."""
     frame = reports.reconcile(snapshot, customer="UKRI")
     february = frame.filter(pl.col("month") == date(2026, 2, 1)).row(0, named=True)
-    assert february["incurred_costs"] == pytest.approx(3.5)
+    assert february["incurred_costs"] == pytest.approx(7.5)
 
 
 def test_reconcile_catches_a_month_counted_twice(tmp_path, allocations, invoices):
@@ -285,7 +414,7 @@ def test_reconcile_catches_a_month_counted_twice(tmp_path, allocations, invoices
         }
         for alloc in ("aaa", "aaa2")
     ]
-    snap = reconciling(tmp_path, "doubled", allocations, doubled, [invoice(2025, 1, 50.0)])
+    snap = reconciling(tmp_path, "doubled", allocations, doubled, [invoice(2025, 1, {"pa": 50.0})])
 
     row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
     assert row["status"] == "usage high"
@@ -305,7 +434,7 @@ def test_reconcile_catches_a_month_the_pull_dropped(tmp_path, allocations, invoi
             "month": 1,
         }
     ]
-    snap = reconciling(tmp_path, "thin", allocations, thin, [invoice(2025, 1, 100.0)])
+    snap = reconciling(tmp_path, "thin", allocations, thin, [invoice(2025, 1, {"pa": 100.0})])
 
     row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
     assert row["status"] == "usage low"
@@ -324,7 +453,8 @@ def test_reconcile_tolerates_the_rounding_between_the_two_sides(tmp_path, alloca
             "month": 4,
         }
     ]
-    snap = reconciling(tmp_path, "rounded", allocations, rows, [invoice(2026, 4, 16695.077778)])
+    billed = [invoice(2026, 4, {"pa": 16695.077778})]
+    snap = reconciling(tmp_path, "rounded", allocations, rows, billed)
     assert reports.reconcile(snap, customer="UKRI").row(0, named=True)["status"] == "ok"
 
     tight = reports.reconcile(snap, customer="UKRI", tolerance=0.0)
@@ -332,7 +462,7 @@ def test_reconcile_tolerates_the_rounding_between_the_two_sides(tmp_path, alloca
 
 
 def test_reconcile_marks_a_month_with_no_usage_behind_the_invoice(tmp_path, allocations):
-    snap = reconciling(tmp_path, "unused", allocations, [], [invoice(2026, 4, 500.0)])
+    snap = reconciling(tmp_path, "unused", allocations, [], [invoice(2026, 4, {"pa": 500.0})])
     row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
     assert row["status"] == "no usage"
     assert row["node_hours"] is None
@@ -358,7 +488,7 @@ def test_reconcile_says_nothing_about_a_month_with_no_invoice(tmp_path, allocati
 
 def test_reconcile_calls_an_empty_month_ok(tmp_path, allocations):
     """Nothing used and nothing billed is agreement, not a gap."""
-    snap = reconciling(tmp_path, "quiet", allocations, [], [invoice(2025, 3, 0.0)])
+    snap = reconciling(tmp_path, "quiet", allocations, [], [invoice(2025, 3, {"pa": 0.0})])
     assert reports.reconcile(snap, customer="UKRI").row(0, named=True)["status"] == "ok"
 
 
@@ -372,7 +502,7 @@ def test_reconcile_all_widens_both_sides_and_stops_corresponding(snapshot):
     """
     frame = reports.reconcile(snapshot, scope=False)
     february = frame.filter(pl.col("month") == date(2026, 2, 1)).row(0, named=True)
-    assert february["incurred_costs"] == pytest.approx(102.5)  # both invoices now
+    assert february["incurred_costs"] == pytest.approx(106.5)  # both invoices now
     assert february["node_hours"] == pytest.approx(3.5)
 
 

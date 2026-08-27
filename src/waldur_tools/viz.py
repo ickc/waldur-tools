@@ -1910,7 +1910,9 @@ def render(
     complete = totals.filter(~pl.col("is_partial"))
     latest = complete.tail(1)
     held = nodes * share
-    codes = per_project["project_code"].unique().to_list()
+    # A project billed after its allocation ended has no code left to look up,
+    # and `is_in` on a list holding a null matches nothing useful anyway.
+    codes = per_project["project_code"].drop_nulls().unique().to_list()
 
     existing = projects_existing(source, months, customer)
     queue = queue_monthly(source, codes)
@@ -1936,11 +1938,12 @@ def render(
                 totals,
                 {
                     "month": "Month",
-                    "node_hours": "Node hours used",
+                    "node_hours": "Node hours billed",
+                    "usage_node_hours": "Node hours still in the usage table",
                     "entitlement_node_hours": "Share worth",
                     "pct_of_entitlement": "% of share",
                     "active_projects": "Active projects",
-                    "active_users": "Active users",
+                    "active_users": "Active users (at least)",
                 },
             ),
         ),

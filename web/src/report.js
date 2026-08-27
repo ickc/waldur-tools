@@ -153,12 +153,15 @@ function render() {
     return;
   }
 
-  const totals = reports.monthlyTotals(rows, { nodes, share, asOf: state.asOf });
-  const perProject = reports.monthly(rows, { nodes, share });
+  const totals = reports.monthlyTotals(rows, invoices, {
+    nodes, share, scope, customer, asOf: state.asOf,
+  });
+  const perProject = reports.monthly(rows, invoices, { nodes, share, scope, customer });
   const months = totals.map((row) => row.month);
   const complete = totals.filter((row) => !row.is_partial);
   const latest = complete.length ? complete[complete.length - 1] : null;
-  const codes = [...new Set(perProject.map((row) => row.project_code))];
+  // A project billed after its allocation ended has no code left to look up.
+  const codes = [...new Set(perProject.map((row) => row.project_code))].filter(Boolean);
 
   const allocation = reports.allocationsReport(scope, summary, { asOf: state.asOf, customer });
   const awarded = reports.committed(allocation, months, state.asOf);
@@ -278,7 +281,7 @@ function render() {
   el('tiles').innerHTML = tiles.join('');
 
   // -- reconcile ------------------------------------------------------------
-  renderReconcile(rows, invoices, customer);
+  renderReconcile(rows, invoices, customer, scope);
 
   // -- figures --------------------------------------------------------------
   ensureSection('share', 'Are we using our share?');
@@ -393,7 +396,7 @@ function note(id, html) {
  * the only independent measurement of these node hours, and the failure it
  * catches -- an unstable pull -- looks exactly like a finding until you check.
  */
-function renderReconcile(rows, invoices, customer) {
+function renderReconcile(rows, invoices, customer, scope) {
   const badge = el('reconcile-badge');
   const detail = el('reconcile');
   if (!invoices.length) {
@@ -401,8 +404,9 @@ function renderReconcile(rows, invoices, customer) {
     detail.innerHTML = '';
     return;
   }
-  const checked = reports.reconcile(rows, invoices, { customer, asOf: state.asOf });
-  const bad = checked.filter((row) => row.status !== 'ok' && row.status !== 'no invoice');
+  const checked = reports.reconcile(rows, invoices, { customer, scope, asOf: state.asOf });
+  const bad = checked.filter((row) => !reports.RECONCILED.has(row.status));
+  const ended = checked.filter((row) => row.status === 'project ended');
   // The table goes up either way. When it reconciles it is the evidence for the
   // badge; when it does not, it is the only thing that says which months and by
   // how much -- and telling a known accounting quirk from an unstable pull is
@@ -412,8 +416,17 @@ function renderReconcile(rows, invoices, customer) {
     ? `<span class="badge warn" title="${esc(
       bad.map((row) => `${reports.monthLabel(row.month)}: ${row.status}`).join(', '),
     )}">${bad.length} month${bad.length === 1 ? '' : 's'} do not reconcile — see below</span>`
-    : `<span class="badge ok" title="Usage agrees with incurred_costs in every invoiced ` +
-      `month">usage reconciles with ${checked.length} months of invoices</span>`;
+    : ended.length
+      ? `<span class="badge ok" title="${esc(
+        `Usage agrees with incurred_costs everywhere it can. ${ended.length} month${
+          ended.length === 1 ? '' : 's'
+        } are short only because a project has since ended and the portal drops a ` +
+        'terminated project\u2019s usage rows; the node hours on this page come from the ' +
+        'invoice and are unaffected.',
+      )}">usage reconciles with ${checked.length} months of invoices — ${ended.length} ` +
+        `explained by ended projects</span>`
+      : `<span class="badge ok" title="Usage agrees with incurred_costs in every invoiced ` +
+        `month">usage reconciles with ${checked.length} months of invoices</span>`;
 }
 
 /**

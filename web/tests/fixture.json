@@ -34,7 +34,7 @@
           "unit_price": "1.0000000000"
         },
         {
-          "billing_type": "fixed",
+          "billing_type": "usage",
           "measured_unit": "",
           "name": "Credit",
           "quantity": "1",
@@ -55,7 +55,7 @@
         "email": "billing@example.test",
         "name": "UKRI"
       },
-      "incurred_costs": "3.5000000000",
+      "incurred_costs": "7.5000000000",
       "items": [
         {
           "billing_type": "usage",
@@ -63,17 +63,37 @@
           "name": "Isambard 3 / NODE",
           "project_name": "Project A",
           "project_uuid": "pa",
-          "quantity": "3.5000000000",
-          "total": "3.50",
+          "quantity": "2.5000000000",
+          "total": "2.50",
           "unit_price": "1.0000000000"
         },
         {
-          "billing_type": "fixed",
+          "billing_type": "usage",
+          "measured_unit": "hours",
+          "name": "Isambard 3 / NODE",
+          "project_name": "Project B",
+          "project_uuid": "pb",
+          "quantity": "1.0000000000",
+          "total": "1.00",
+          "unit_price": "1.0000000000"
+        },
+        {
+          "billing_type": "usage",
+          "measured_unit": "hours",
+          "name": "Isambard 3 / NODE",
+          "project_name": "Project Z",
+          "project_uuid": "pz",
+          "quantity": "4.0000000000",
+          "total": "4.00",
+          "unit_price": "1.0000000000"
+        },
+        {
+          "billing_type": "usage",
           "measured_unit": "",
           "name": "Credit",
           "quantity": "1",
-          "total": "-3.50",
-          "unit_price": "-3.50"
+          "total": "-7.50",
+          "unit_price": "-7.50"
         }
       ],
       "month": 2,
@@ -102,7 +122,7 @@
           "unit_price": "1.0000000000"
         },
         {
-          "billing_type": "fixed",
+          "billing_type": "usage",
           "measured_unit": "",
           "name": "Credit",
           "quantity": "1",

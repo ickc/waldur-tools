@@ -262,8 +262,14 @@ def test_the_fixture_exercises_what_it_claims_to(snapshot):
         "2025-01": False,
         "2026-02": True,
     }
-    # Two projects in one month, so the per-project split has something to split.
-    assert sum(row["month"] == "2026-02" for row in expected["monthly"]) == 2
+    # Three projects in one month, so the per-project split has something to
+    # split -- and one of them, Project Z, is billed with no usage rows behind
+    # it, so the JavaScript has to take its node hours off the ledger too.
+    february = [row for row in expected["monthly"] if row["month"] == "2026-02"]
+    assert len(february) == 3
+    zed = next(row for row in february if row["project_name"] == "Project Z")
+    assert zed["node_hours"] == 4.0
+    assert zed["active_users"] is None
     # Another organisation's usage the scope has to drop: Carol's 99 node hours
     # must appear in neither total.
     assert all(row["node_hours"] < 99 for row in totals)
@@ -271,8 +277,12 @@ def test_the_fixture_exercises_what_it_claims_to(snapshot):
     # relative view has both a denominator and a blank.
     rates = [row["mean_monthly_allocation"] for row in expected["allocations"]]
     assert any(rate is not None for rate in rates)
-    # An invoice for a different customer, filtered out rather than netted off.
-    assert all(row["status"] == "ok" for row in expected["reconcile"])
+    # An invoice for a different customer, filtered out rather than netted off,
+    # and a month whose shortfall is a project that ended rather than a defect.
+    assert {row["month"]: row["status"] for row in expected["reconcile"]} == {
+        "2025-01": "ok",
+        "2026-02": "project ended",
+    }
     # Associations that are out of scope and associations that are blanked.
     assert expected["people_with_access"] == 2
 

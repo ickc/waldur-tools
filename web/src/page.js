@@ -8,7 +8,7 @@
  */
 
 import { format } from './figures.js';
-import { humaniseBytes, monthLabel, monthLabelLong } from './reports.js';
+import { RECONCILED, humaniseBytes, monthLabel, monthLabelLong } from './reports.js';
 
 export function esc(value) {
   return String(value ?? '')
@@ -115,13 +115,14 @@ export function tableView(rows, columns) {
  */
 export function reconcileTable(rows) {
   if (!rows.length) return '';
-  const bad = rows.filter((row) => row.status !== 'ok' && row.status !== 'no invoice');
+  const bad = rows.filter((row) => !RECONCILED.has(row.status));
+  const ended = rows.filter((row) => row.status === 'project ended');
   const cell = (value, digits = 1) =>
     value === null || value === undefined ? '<td class="na">—</td>' : `<td>${format(value, digits)}</td>`;
 
   const body = rows
     .map((row) => {
-      const flagged = row.status !== 'ok' && row.status !== 'no invoice';
+      const flagged = !RECONCILED.has(row.status);
       const sign = row.pct_difference !== null && row.pct_difference > 0 ? '+' : '';
       return (
         `<tr class="${flagged ? 'flagged' : ''}">` +
@@ -132,6 +133,7 @@ export function reconcileTable(rows) {
         (row.pct_difference === null
           ? '<td class="na">—</td>'
           : `<td>${sign}${format(row.pct_difference, 1)}%</td>`) +
+        cell(row.missing_node_hours) +
         `<td>${esc(row.invoice_state ?? '—')}</td>` +
         `<td class="${flagged ? 'bad' : 'good'}">${esc(row.status)}</td>` +
         '</tr>'
@@ -144,15 +146,25 @@ export function reconcileTable(rows) {
     `<summary>Invoice cross-check, month by month${
       bad.length ? ` — ${bad.length} month${bad.length === 1 ? '' : 's'} disagree` : ''
     }</summary>` +
-    '<p class="sub">Node hours summed from <code>openportal-allocation-user-usage</code> ' +
-    'beside <code>incurred_costs</code> on the invoice for the same month — two routes to ' +
-    'the same figure, aggregated by different sides of the portal. A positive difference ' +
-    'is usage nobody billed, which is the shape a duplicated page takes; a negative one ' +
-    'is billing with no usage behind it, which is not something paging can cause. ' +
+    '<p class="sub">The figures on this page are the invoice’s. This table puts the other ' +
+    'route beside them: node hours summed from ' +
+    '<code>openportal-allocation-user-usage</code>, aggregated by a different side of the ' +
+    'portal. A positive difference is usage nobody billed, which is the shape a duplicated ' +
+    'page takes. A negative one is billing with no usage behind it — and the usual cause is ' +
+    'not a bad pull but a project that has ended, because the portal drops a terminated ' +
+    'project’s usage rows for every month it ever ran while its invoices stand. The ' +
+    '<em>Ended projects</em> column is what those projects were billed; where it covers the ' +
+    'difference the month reads <em>project ended</em> and nothing is wrong. ' +
     'The month in progress is expected to disagree and is marked partial.</p>' +
+    (ended.length
+      ? `<p class="sub"><strong>${ended.length} month${ended.length === 1 ? '' : 's'}</strong> ` +
+        'below are short on the usage side only because a project has since ended. Their ' +
+        'node hours on this page are still the invoice’s and are complete; what is ' +
+        'incomplete is the <em>active users</em> count, which has no ledger to come from.</p>'
+      : '') +
     '<div class="tablewrap"><table><thead><tr>' +
-    '<th>Month</th><th>Node hours used</th><th>Invoiced</th><th>Difference</th>' +
-    '<th>%</th><th>Invoice state</th><th>Status</th>' +
+    '<th>Month</th><th>Node hours in the usage table</th><th>Invoiced</th><th>Difference</th>' +
+    '<th>%</th><th>Ended projects</th><th>Invoice state</th><th>Status</th>' +
     `</tr></thead><tbody>${body}</tbody></table></div></details>`
   );
 }

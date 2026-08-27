@@ -268,16 +268,44 @@ def user_usage_rows():
     ]
 
 
-def invoice(year, month, hours, customer="UKRI", state="created"):
-    """One month's invoice, carrying the two traps the real ones do.
+#: The projects the invoice fixture bills, keyed by the ``project_uuid`` the
+#: allocations carry. ``pz`` deliberately has no allocation and no usage rows:
+#: it is a project that has ended, and the portal drops a terminated project's
+#: usage retrospectively while leaving its invoices exactly as they were.
+PROJECT_NAMES = {"pa": "Project A", "pb": "Project B", "pz": "Project Z"}
+
+
+def invoice(year, month, lines, customer="UKRI", state="created"):
+    """One month's invoice, carrying the traps the real ones do.
+
+    ``lines`` maps ``project_uuid`` to that project's node hours, because a real
+    invoice is itemised: one usage line per project, and ``incurred_costs`` the
+    sum of them. ``reports.invoiced_projects`` reads the lines and
+    ``reports.invoiced`` the header, and the two agreeing is the whole basis for
+    reporting off the ledger.
 
     ``incurred_costs`` is the node hours -- the portal bills one credit per node
     hour, ``unit_price`` exactly ``1.0000000000`` on every usage line -- and
     ``price``/``total`` are that same usage net of the credit line the portal
     writes to zero a grant-funded invoice out. So the totals are 0.00 while the
-    month really billed ``hours``, which is why ``reports.invoiced`` reads
-    ``incurred_costs`` and nothing else.
+    month really billed the lot, which is why ``reports.invoiced`` reads
+    ``incurred_costs`` and nothing else, and why ``invoiced_projects`` keeps
+    only the lines priced at one credit an hour.
     """
+    hours = sum(lines.values())
+    items = [
+        {
+            "name": "Isambard 3 / NODE",
+            "billing_type": "usage",
+            "measured_unit": "hours",
+            "quantity": f"{value:.10f}",
+            "unit_price": "1.0000000000",
+            "total": f"{value:.2f}",
+            "project_name": PROJECT_NAMES[uuid],
+            "project_uuid": uuid,
+        }
+        for uuid, value in lines.items()
+    ]
     return {
         "number": 100000 + year * 100 + month,
         "year": year,
@@ -289,19 +317,13 @@ def invoice(year, month, hours, customer="UKRI", state="created"):
         "incurred_costs": f"{hours:.10f}",
         "customer_details": {"name": customer, "email": "billing@example.test"},
         "items": [
+            *items,
             {
-                "name": "Isambard 3 / NODE",
-                "billing_type": "usage",
-                "measured_unit": "hours",
-                "quantity": f"{hours:.10f}",
-                "unit_price": "1.0000000000",
-                "total": f"{hours:.2f}",
-                "project_name": "Project A",
-                "project_uuid": "pa",
-            },
-            {
+                # The credit line, which is not node hours and must not be summed
+                # as if it were. Its unit is blank and its unit price is a large
+                # negative, which is what marks it off from a usage line.
                 "name": "Credit",
-                "billing_type": "fixed",
+                "billing_type": "usage",
                 "measured_unit": "",
                 "quantity": "1",
                 "unit_price": f"-{hours:.2f}",
@@ -313,17 +335,23 @@ def invoice(year, month, hours, customer="UKRI", state="created"):
 
 @pytest.fixture
 def invoices():
-    """Invoices matching ``user_usage_rows``, plus one that is not ours.
+    """Invoices matching ``user_usage_rows``, plus a project that has ended.
 
-    1.5 node hours in January 2025 and 3.5 in February 2026 are exactly what the
-    usage rows sum to for the two projects this token administers. Carol's 99.0
-    is not in them: her organisation is invoiced separately, and its invoice is
-    here to be filtered out rather than netted off.
+    January 2025 bills the 1.5 node hours Project A's usage rows sum to.
+    February 2026 bills the 2.5 and 1.0 that Projects A and B sum to, **and a
+    further 4.0 to Project Z** -- which has no allocation and no usage rows at
+    all, because the portal stops returning a terminated project's usage while
+    its invoices stand. So the ledger reads 7.5 that month where the usage
+    endpoint can only reach 3.5, and the missing 4.0 is not a bad pull. It is
+    the case ``reports.reconcile`` calls ``project ended``.
+
+    Carol's 99.0 is neither: her organisation is invoiced separately, and its
+    invoice is here to be filtered out rather than netted off.
     """
     return [
-        invoice(2025, 1, 1.5),
-        invoice(2026, 2, 3.5, state="pending"),
-        invoice(2026, 2, 99.0, customer="Other Uni"),
+        invoice(2025, 1, {"pa": 1.5}),
+        invoice(2026, 2, {"pa": 2.5, "pb": 1.0, "pz": 4.0}, state="pending"),
+        invoice(2026, 2, {"pa": 99.0}, customer="Other Uni"),
     ]
 
 

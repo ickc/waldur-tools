@@ -115,16 +115,20 @@ const rows = reports.monthlyRows(
   customer,
 );
 
-const totals = reports.monthlyTotals(rows, { nodes, share, asOf });
+const totals = reports.monthlyTotals(rows, fixture.invoices, {
+  nodes, share, scope, customer, asOf,
+});
 sameRows('monthlyTotals', totals, expected.monthly_totals, [
-  'month', 'node_hours', 'active_projects', 'active_users', 'projects_with_usage_rows',
+  'month', 'node_hours', 'usage_node_hours', 'node_hours_source', 'active_projects',
+  'active_users', 'projects_with_usage_rows', 'projects_without_usage',
   'entitlement_node_hours', 'pct_of_entitlement', 'mean_nodes', 'unused_node_hours',
   'is_partial',
 ]);
 
-const perProject = reports.monthly(rows, { nodes, share });
+const perProject = reports.monthly(rows, fixture.invoices, { nodes, share, scope, customer });
 sameRows('monthly', perProject, expected.monthly, [
-  'month', 'project_code', 'project_name', 'customer_name', 'node_hours', 'active_users',
+  'month', 'project_code', 'project_name', 'customer_name', 'node_hours',
+  'usage_node_hours', 'node_hours_source', 'active_users',
   'entitlement_node_hours', 'pct_of_entitlement', 'mean_nodes',
 ]);
 
@@ -160,9 +164,10 @@ sameRows('invoiced', reports.invoiced(fixture.invoices, customer), expected.invo
 
 sameRows(
   'reconcile',
-  reports.reconcile(rows, fixture.invoices, { customer, asOf }),
+  reports.reconcile(rows, fixture.invoices, { customer, scope, asOf }),
   expected.reconcile,
-  ['month', 'node_hours', 'incurred_costs', 'difference', 'pct_difference', 'status',
+  ['month', 'node_hours', 'incurred_costs', 'billed_node_hours', 'items_difference',
+    'difference', 'pct_difference', 'missing_projects', 'missing_node_hours', 'status',
     'invoice_state', 'is_partial'],
 );
 

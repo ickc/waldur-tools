@@ -28,7 +28,11 @@ quoting a figure:
    returns some rows twice and drops others. Nothing about the *numbers* is
    changed; the pull is. See
    [One endpoint cannot be paged straight through](#one-endpoint-cannot-be-paged-straight-through).
-5. **`reconcile` compares two endpoints that should agree**, and is the only
+5. **The monthly reports take their node hours off the invoice.** The usage
+   endpoint drops a project's rows for every month it ever ran once its
+   allocation is terminated, so a total summed from it decays. See
+   [`monthly` and `monthly-totals`](#monthly-and-monthly-totals--from-invoices-with-users-from-the-usage-endpoint).
+6. **`reconcile` compares two endpoints that should agree**, and is the only
    report whose output is a verdict rather than a table of the portal's own
    figures. Run it before quoting anything derived from the usage endpoint.
 
@@ -189,27 +193,61 @@ the cluster, not whether anyone is using it. Every allocation in normal
 operation reads `OK`. `is_active` is the separate question of whether the
 allocation is switched on.
 
-### `monthly` and `monthly-totals` — from `openportal-allocation-user-usage`
+### `monthly` and `monthly-totals` — from `invoices`, with users from the usage endpoint
 
-The only endpoint with a time axis, and therefore the base of every figure in
-the visual report. One source row per user, allocation and calendar month.
-`monthly` groups by month and project; `monthly-totals` groups by month alone.
-Neither is derivable from the other: distinct users per month cannot be
-recovered by summing a per-project user count, so both aggregate the same
-private base frame (`reports._monthly_rows`).
+Two sources, and which column comes from which is the point.
+
+**Node hours come from the ledger.** `invoices[].items[]` carries one usage line
+per project per month, each with a `project_uuid`, a `project_name` and a
+`quantity` in node hours (`reports.invoiced_projects`). `monthly` groups those
+by month and project; `monthly-totals` groups them by month alone.
+
+**Everything about people comes from `openportal-allocation-user-usage`**, the
+only endpoint with a user axis: one source row per user, allocation and calendar
+month, aggregated through the private base frame `reports._monthly_rows`.
+
+The split is not stylistic. **When a project's allocation is terminated the
+portal stops returning its usage rows entirely** — every month it ever ran, not
+only the months since — while its invoices stand. Measured against a snapshot
+holding three terminated projects, the usage endpoint had zero rows for all
+three across the whole table. So a total summed out of that endpoint shrinks
+every time a project finishes, and shrinks retrospectively: last January's
+figure is smaller today than it was in January. The ledger does not move. There
+is no join that recovers those rows — widening the scope to include terminated
+`marketplace-resources` returns identical totals, because there is nothing left
+on the other side to match — so the only options are to report the ledger or to
+report a number that decays, and this reports the ledger.
 
 | Column | Derivation |
 | --- | --- |
 | `month` | `date(year, month, 1)` from the two integer columns |
-| `node_hours` | `sum(node_usage)` — cumulative-safe here, unlike the same-named field on allocations |
-| `active_users` | distinct `unix_username` **with non-zero usage**, so it reads as "who ran", not "who could have" |
-| `active_projects` | distinct project codes with non-zero usage (totals only) |
-| `projects_with_usage_rows` | distinct project codes reporting *at all* that month, zero included — the gap against `active_projects` is projects that existed and ran nothing (totals only) |
+| `node_hours` | `sum(items[].quantity)` over that month's invoice usage lines — for `monthly`, that project's lines only |
+| `usage_node_hours` | the same month's `sum(node_usage)` out of the usage endpoint, kept as the visible cross-check; **null** where the endpoint no longer describes the project |
+| `node_hours_source` | `invoice` in a month the portal has invoiced, `usage` in one it has not — see below |
+| `active_users` | distinct `unix_username` **with non-zero usage**, so it reads as "who ran", not "who could have"; **null** on a project with no usage rows left, and a **lower bound** on any month where `projects_without_usage` is above zero |
+| `active_projects` | distinct billed projects with non-zero node hours — off the ledger, so a terminated project still counts (totals only) |
+| `projects_with_usage_rows` | distinct project codes reporting *at all* that month in the usage endpoint, zero included (totals only) |
+| `projects_without_usage` | billed projects that endpoint no longer describes — how far `active_users` is understated (totals only) |
 | `entitlement_node_hours` | `nodes * share * 24 * days_in_month` — see below |
 | `pct_of_entitlement` | `100 * node_hours / entitlement_node_hours` |
 | `mean_nodes` | `node_hours / (24 * days_in_month)`: nodes running, averaged over the month |
 | `unused_node_hours` | `entitlement - node_hours`, negative when we went over (totals only) |
 | `is_partial` | the month the data was taken in (totals only) |
+
+`node_hours_source` decides per month, not per row. **In a month the portal has
+invoiced, the invoice is the answer and a project missing from it is a zero** —
+it billed nothing, which is a figure rather than an absence. In a month not yet
+invoiced there is no ledger to read and the usage roll-up stands in. A snapshot
+pulled without the `invoices` endpoint at all degrades the same way rather than
+failing, and every month then reads `usage`.
+
+Only the invoice lines priced at one credit an hour are summed
+(`measured_unit == "hours"` and `unit_price == 1`). The credit line that zeroes
+a grant-funded month out is a single entry with a large negative unit price and
+a quantity of one, and its `billing_type` has been seen to read `usage` as
+readily as `fixed` — so the unit and the price are what distinguish it, not the
+type. `reconcile.items_difference` checks that the kept lines still sum to
+`incurred_costs`, which they have on every invoice in every snapshot to date.
 
 On `monthly`, `pct_of_entitlement` measures **one project against the whole
 organisation's share** — "how much of our slice did this project alone account
@@ -459,10 +497,14 @@ a credit line cancels.
 
 | Column | Derivation |
 | --- | --- |
-| `node_hours` | `sum(node_usage)` for the customer's projects that month — the same figure `monthly-totals` prints, from `reports._monthly_rows` |
+| `node_hours` | `sum(node_usage)` for the customer's projects that month, from `reports._monthly_rows` — the usage route, which is **not** what `monthly-totals` prints |
 | `incurred_costs` | `sum(incurred_costs)` over that month's invoices for the same customer, matched on the name inside `customer_details` |
+| `billed_node_hours` | the same invoices read line by line rather than off their headers — `reports.invoiced_projects` summed per month, and the figure `monthly-totals` actually prints |
+| `items_difference` | `billed_node_hours - incurred_costs`; anything but zero means a usage line has stopped looking like a usage line and the per-project split has quietly lost some |
 | `difference` | `node_hours - incurred_costs`, **null** when a month is missing from one side entirely |
 | `pct_difference` | `100 * difference / incurred_costs`, null on a zero invoice |
+| `missing_projects` | projects billed that month with no usage rows behind them — their allocations have been terminated |
+| `missing_node_hours` | what those projects were billed: the whole of the shortfall, in the usual case |
 | `status` | see below; the comparison reads a missing side as zero, so a month nobody used and nobody billed is `ok` rather than a flag |
 | `invoice_state` | the invoice's own `state` (`created`, `pending`), distinct values comma-joined |
 | `is_partial` | the month the snapshot was taken in, as in `monthly-totals` |
@@ -472,6 +514,15 @@ a credit line cancels.
 whichever allowance is larger; `usage high` or `usage low` when they are not;
 `no invoice` for usage in a month the portal has not invoiced, and `no usage`
 for an invoice with no usage rows behind it.
+
+`project ended` sits between `ok` and `usage low`: the usage side is short, and
+adding `missing_node_hours` back brings it inside the same allowance. That is a
+terminated project whose usage rows the portal has dropped, and it is not a
+defect in the pull, the scope or the billing. It leaves no reported figure
+wrong either, because the reported figures are `billed_node_hours`; what it does
+leave short is `active_users`, which has no ledger to come from. Measured
+against real snapshots, the terminated projects accounted for better than 99.8%
+of the gap in every month that had one.
 
 Both thresholds are set to catch a broken pull rather than to audit rounding.
 The two sides are rolled up differently — the usage endpoint rounds each

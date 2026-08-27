@@ -197,23 +197,39 @@ with `--desc`, `-o FILE.csv|.json|.parquet`, and `--all` on `allocations`,
 `membership`, `user-usage`, `monthly`, `monthly-totals`, `reconcile`,
 `storage` and `storage-monthly` to lift the scope filter described below.
 
-**Run `reconcile` before you quote anything from `monthly`, `monthly-totals` or
-`viz`.** It puts the node hours those three sum out of
-`openportal-allocation-user-usage` beside `incurred_costs` from `invoices` —
-the same node hours by a completely different route, since this deployment
-bills one credit per node hour — and prints one word per month:
+**The node hours in `monthly`, `monthly-totals` and `viz` come off the
+invoice.** This deployment bills one credit per node hour, and each invoice
+itemises its usage lines by project, so the ledger answers "how many node hours
+did this project run in this month?" directly. The reason to prefer it is not
+precision but permanence: **when a project's allocation is terminated the portal
+stops returning its usage rows entirely** — every month it ever ran, not just
+the months since — while the invoices it appeared on stand untouched. A total
+summed out of `openportal-allocation-user-usage` therefore shrinks every time a
+project finishes, and shrinks *retrospectively*, so last January's figure is
+smaller today than it was in January.
+
+The usage endpoint is still the only thing with a user axis, so `user-usage`,
+and the *active users* column everywhere else, still come from it — and are a
+**lower bound** in any month that had a project since terminated. Node hours in
+those months are complete; the head count is not.
+
+**Run `reconcile` before you quote anything.** It puts the two routes side by
+side and prints one word per month:
 
 ```
-month        node_hours   incurred_costs    difference   status
-2024-05       30,000.00        15,000.00     15,000.00   usage high
-2024-06       12,000.00        12,000.00          0.00   ok
+month        node_hours   incurred_costs    difference   missing   status
+2024-05       30,000.00        15,000.00     15,000.00      0.00   usage high
+2024-06       12,000.00        12,000.00          0.00      0.00   ok
+2024-07        8,000.00        10,000.00     -2,000.00  2,000.00   project ended
 ```
 
 (Illustrative — replace with your own snapshot's numbers.) `ok` means the two
-sides are within 1% of each other, and `usage high` / `usage low` mean the
-pull is the first thing to suspect — which is exactly the check that would
-have caught the paging bug described below, before an inflated headline
-could be read as a finding.
+sides are within 1% of each other. `usage high` / `usage low` mean the pull is
+the first thing to suspect — which is exactly the check that would have caught
+the paging bug described below, before an inflated headline could be read as a
+finding. `project ended` means the usage side is short by exactly what a
+terminated project was billed: nothing needs fixing and no reported figure is
+wrong, because the reported figures are the invoice's.
 
 The reports are thin: they select and rename columns from one or two endpoints
 and derive a handful of arithmetic ones. **[DEVELOPER.md](DEVELOPER.md) lists
@@ -483,15 +499,25 @@ Findings from working against a live deployment, which shaped the reports:
   past the true figure. It is fetched a month at a time instead, and both the
   pull and every read are checked for repeated rows. Details in
   [DEVELOPER.md](DEVELOPER.md#one-endpoint-cannot-be-paged-straight-through).
+- **Terminating a project erases its usage, retrospectively.** Once an
+  allocation is terminated, `openportal-allocation-user-usage` returns *no rows
+  at all* for that project code — not blanked rows, and not only the months
+  since it ended, but its whole history. Its invoices are untouched. This is
+  not something the reports can join their way around, and widening the scope to
+  include terminated `marketplace-resources` returns identical totals, because
+  there is nothing left on the other side to match. It is why the node-hour
+  figures are taken off the ledger; see the note above `reconcile`.
 - `invoices.incurred_costs` is **the same node hours by another route**. Every
   usage line on every invoice bills `1.0000000000` credits per hour, and
   `incurred_costs` equals those lines' quantities summed, to the last decimal
-  place, on every one of them. That is what `reconcile` cross-checks against —
-  and it is the only second opinion with a time axis, since the other pair that
-  agrees (`allocations.node_usage` and `current_month_spend`) covers only the
-  month in progress. Do not use `price` or `total` for this: they are net of
-  the credit lines that zero a grant-funded invoice out, so an invoice can
-  bill thousands of node hours and show a `total` near zero.
+  place, on every one of them. Each of those lines also carries a `project_uuid`
+  and a `project_name`, so the ledger splits by project as well as by month —
+  which is what makes it usable as the primary source and not only as a
+  cross-check. Do not use `price` or `total` for this: they are net of the
+  credit lines that zero a grant-funded invoice out, so an invoice can bill
+  thousands of node hours and show a `total` near zero. And beware the credit
+  line itself: its `billing_type` has been seen to read `usage`, so the usage
+  lines are picked out by `measured_unit == "hours"` and `unit_price == 1`.
 - Money and usage arrive as decimal *strings*, hence `frames.numeric`.
 - `slurm-*`, `events` and `keys` return empty; `support-issues` returns 424.
 - Unrecognised query parameters are silently ignored, so an unsupported filter

@@ -273,6 +273,14 @@ export function customersInScope(allocations) {
  * as wide as this can honestly go -- usage does arrive for other organisations,
  * but their codes resolve to no name, no customer and no limit, so there is
  * nothing to attribute it to.
+ *
+ * **These rows are not a complete history and cannot be made into one.** When a
+ * project's allocation is terminated the portal stops returning its usage rows
+ * -- every month of them, not just the months since -- while the invoices that
+ * project appeared on stand untouched. No widening of the scope here reaches
+ * them, because there is nothing left on the other side to match. So this is
+ * the *per-user* series and nothing else; every total comes off the ledger, via
+ * `invoicedProjects`.
  */
 export function monthlyRows(usage, scope, customer = null) {
   const projects = new Map();
@@ -294,6 +302,7 @@ export function monthlyRows(usage, scope, customer = null) {
     rows.push({
       month: monthKey(year, month),
       project_code: code,
+      project_uuid: project.project_uuid,
       project_name: project.project_name,
       customer_name: project.customer_name,
       unix_username: unixUsername(record.username),
@@ -304,29 +313,80 @@ export function monthlyRows(usage, scope, customer = null) {
 }
 
 /**
+ * Which of the two measurements a month's `node_hours` may be taken from.
+ *
+ * The rule is per month, not per row. **In a month the portal has invoiced, the
+ * invoice is the answer and a row missing from it is a zero**: it billed
+ * nothing, which is a figure rather than an absence. In a month not yet
+ * invoiced there is no ledger to read and the usage roll-up stands in, and
+ * `node_hours_source` says which -- because a reader comparing two months
+ * should know when they are comparing two different measurements.
+ */
+function ledgerMonths(invoices, customer) {
+  return new Set(invoiced(invoices, customer).map((row) => row.month));
+}
+
+/**
  * One row per month: how much of our share of the machine we actually used.
  *
  * The headline series. `pct_of_entitlement` is the number the whole report is
  * built around -- 100% means we ran, on average across the month, exactly the
  * `nodes * share` nodes our share is worth.
  *
- * `active_projects` and `active_users` count only non-zero usage, so they read
- * as "who actually ran something" rather than "who could have". `is_partial`
- * marks the month `asOf` falls in, which is incomplete by construction and must
- * be kept out of any average.
+ * `node_hours` is the month's invoice -- see `monthly` for why the ledger and
+ * not the usage endpoint. `usage_node_hours` is the same month summed out of
+ * `openportal-allocation-user-usage`, kept beside it as the cross-check
+ * `reconcile` formalises.
+ *
+ * **Only `active_projects` counts what the ledger knows.** A project billed for
+ * node hours ran them, whether or not its usage rows still exist, so that count
+ * comes off the invoice. `active_users` cannot: the invoice has no user axis at
+ * all, so it is a **lower bound** wherever `projects_without_usage` is above
+ * zero. Both count only non-zero usage, so they read as "who actually ran
+ * something" rather than "who could have". `is_partial` marks the month `asOf`
+ * falls in, which is incomplete by construction and must be kept out of any
+ * average.
  */
-export function monthlyTotals(rows, { nodes = TOTAL_NODES, share = DEFAULT_SHARE, asOf } = {}) {
+export function monthlyTotals(rows, invoices, {
+  nodes = TOTAL_NODES, share = DEFAULT_SHARE, scope = [], customer = null, asOf,
+} = {}) {
   const partial = monthOf(asOf);
-  const out = [];
+  const ledger = ledgerMonths(invoices, customer);
+  const billed = new Map();
+  for (const [month, bucket] of groupBy(
+    invoicedProjects(invoices, scope, customer), (row) => row.month,
+  )) {
+    billed.set(month, {
+      node_hours: sumOf(bucket, 'node_hours'),
+      active_projects: distinct(bucket, 'project_uuid', (row) => row.node_hours > 0),
+      projects_without_usage: bucket.filter((row) => row.project_code === null).length,
+    });
+  }
+  const used = new Map();
   for (const [month, bucket] of groupBy(rows, (row) => row.month)) {
-    const nodeHours = sumOf(bucket, 'node_usage');
+    used.set(month, {
+      usage_node_hours: sumOf(bucket, 'node_usage'),
+      active_users: distinct(bucket, 'unix_username', (row) => row.node_usage > 0),
+      projects_with_usage_rows: distinct(bucket, 'project_code'),
+    });
+  }
+
+  const out = [];
+  for (const month of [...new Set([...billed.keys(), ...used.keys()])]) {
+    const left = billed.get(month);
+    const right = used.get(month);
+    const fromLedger = ledger.has(month);
+    const nodeHours = fromLedger ? (left?.node_hours ?? 0) : (right?.usage_node_hours ?? null);
     const worth = entitlement(month, nodes, share);
     out.push({
       month,
       node_hours: nodeHours,
-      active_projects: distinct(bucket, 'project_code', (row) => row.node_usage > 0),
-      active_users: distinct(bucket, 'unix_username', (row) => row.node_usage > 0),
-      projects_with_usage_rows: distinct(bucket, 'project_code'),
+      usage_node_hours: right?.usage_node_hours ?? null,
+      node_hours_source: fromLedger ? 'invoice' : 'usage',
+      active_projects: left?.active_projects ?? 0,
+      active_users: right?.active_users ?? null,
+      projects_with_usage_rows: right?.projects_with_usage_rows ?? 0,
+      projects_without_usage: left?.projects_without_usage ?? 0,
       entitlement_node_hours: worth,
       pct_of_entitlement: (100 * nodeHours) / worth,
       mean_nodes: nodeHours / (worth / (nodes * share)),
@@ -340,24 +400,66 @@ export function monthlyTotals(rows, { nodes = TOTAL_NODES, share = DEFAULT_SHARE
 /**
  * Node hours per project per calendar month.
  *
+ * `node_hours` is the invoice's, from `invoicedProjects`: the usage lines of
+ * that month's invoice, already attributed to the project that ran them. The
+ * user axis -- `active_users` -- is the only thing the invoice cannot supply,
+ * and that comes from `openportal-allocation-user-usage`.
+ *
+ * **Why the ledger and not the usage endpoint.** The usage endpoint returns
+ * nothing for a project whose allocation has been terminated: not the months
+ * since it ended, the whole history. So a report summed out of it shrinks every
+ * time a project finishes, and shrinks *retrospectively* -- last January's
+ * figure is smaller today than it was in January. The invoice does not move.
+ *
+ * `active_users` is therefore null, not zero, for a project the usage endpoint
+ * no longer describes: nobody knows how many people ran it, and a zero would
+ * say nobody did. `node_hours` for that project is still right.
+ *
  * `entitlement_node_hours` is the whole organisation's monthly share, so
  * `pct_of_entitlement` measures one project against all of it and answers "how
  * much of our slice did this project alone account for?". It is not a
  * per-project quota; nothing in the portal allocates the share out to projects.
  */
-export function monthly(rows, { nodes = TOTAL_NODES, share = DEFAULT_SHARE } = {}) {
-  const out = [];
-  for (const [, bucket] of groupBy(rows, (row) => `${row.month}\u0000${row.project_code}`)) {
+export function monthly(rows, invoices, {
+  nodes = TOTAL_NODES, share = DEFAULT_SHARE, scope = [], customer = null,
+} = {}) {
+  const ledger = ledgerMonths(invoices, customer);
+  const key = (month, uuid) => `${month}\u0000${uuid}`;
+
+  const used = new Map();
+  for (const [, bucket] of groupBy(rows, (row) => key(row.month, row.project_uuid))) {
     const first = bucket[0];
-    const nodeHours = sumOf(bucket, 'node_usage');
-    const worth = entitlement(first.month, nodes, share);
-    out.push({
+    used.set(key(first.month, first.project_uuid), {
       month: first.month,
+      project_uuid: first.project_uuid,
       project_code: first.project_code,
       project_name: first.project_name,
       customer_name: first.customer_name,
-      node_hours: nodeHours,
+      usage_node_hours: sumOf(bucket, 'node_usage'),
       active_users: distinct(bucket, 'unix_username', (row) => row.node_usage > 0),
+    });
+  }
+  const billed = new Map(
+    invoicedProjects(invoices, scope, customer).map((row) => [key(row.month, row.project_uuid), row]),
+  );
+
+  const out = [];
+  for (const id of new Set([...billed.keys(), ...used.keys()])) {
+    const left = billed.get(id);
+    const right = used.get(id);
+    const month = left?.month ?? right.month;
+    const fromLedger = ledger.has(month);
+    const nodeHours = fromLedger ? (left?.node_hours ?? 0) : (right?.usage_node_hours ?? null);
+    const worth = entitlement(month, nodes, share);
+    out.push({
+      month,
+      project_code: left?.project_code ?? right?.project_code ?? null,
+      project_name: left?.project_name ?? right?.project_name ?? null,
+      customer_name: left?.customer_name ?? right?.customer_name ?? null,
+      node_hours: nodeHours,
+      usage_node_hours: right?.usage_node_hours ?? null,
+      node_hours_source: fromLedger ? 'invoice' : 'usage',
+      active_users: right?.active_users ?? null,
       entitlement_node_hours: worth,
       pct_of_entitlement: (100 * nodeHours) / worth,
       mean_nodes: nodeHours / (worth / (nodes * share)),
@@ -553,19 +655,126 @@ export function invoiced(invoices, customer = null) {
 }
 
 /**
+ * The node hours the portal billed, one row per project per calendar month.
+ *
+ * `invoiced` reads the invoice header; this reads the lines underneath it. Each
+ * `items[]` entry carries a `project_uuid`, a `project_name` and a `quantity`,
+ * so the same node hours the header states as one number arrive here already
+ * attributed to the project that ran them.
+ *
+ * **Only the usage lines are kept**: `measured_unit` of `hours` and a
+ * `unit_price` of 1. An invoice also carries the credit line the portal writes
+ * to zero a grant-funded month out -- a single entry with a large negative unit
+ * price and a quantity of one -- and summing that in would subtract a number of
+ * node hours that were never node hours. Filtering on the unit and the price
+ * rather than on `billing_type` is deliberate: the credit line's `billing_type`
+ * has been seen to read `usage` as readily as `fixed`, where the unit and the
+ * unit price have never been anything but what a node hour costs.
+ *
+ * The kept lines sum, per month, to that month's `incurred_costs` exactly. So
+ * this is a decomposition of the ledger rather than a second estimate of it,
+ * and `reconcile` reports the two side by side so a month where that stops
+ * being true says so.
+ *
+ * **This is the only per-project series that survives a project ending.**
+ * `openportal-allocation-user-usage` returns nothing at all for a project whose
+ * allocation has been terminated -- not blanked rows, no rows -- while the
+ * invoices that project appeared on stay exactly as they were. `project_code`
+ * is filled in from `scope` where the project still has an allocation and is
+ * null where it does not, which is how the rest of this file recognises one.
+ */
+export function invoicedProjects(invoices, scope, customer = null) {
+  const codes = new Map();
+  for (const project of scope) {
+    if (project.project_uuid && !codes.has(project.project_uuid)) {
+      codes.set(project.project_uuid, project.project_code);
+    }
+  }
+
+  const perProject = new Map();
+  for (const record of invoices) {
+    const owner = customerOfInvoice(record);
+    if (customer !== null && owner !== customer) continue;
+    const year = int(record.year);
+    const month = int(record.month);
+    if (year === null || month === null) continue;
+    for (const item of invoiceItems(record)) {
+      if (item.measured_unit !== 'hours') continue;
+      if (num(item.unit_price) !== 1) continue;
+      const key = `${monthKey(year, month)}\u0000${item.project_uuid}`;
+      let bucket = perProject.get(key);
+      if (bucket === undefined) {
+        bucket = {
+          month: monthKey(year, month),
+          project_uuid: item.project_uuid ?? null,
+          project_name: item.project_name ?? null,
+          project_code: codes.get(item.project_uuid) ?? null,
+          customer_name: owner,
+          node_hours: 0,
+        };
+        perProject.set(key, bucket);
+      }
+      bucket.node_hours += num(item.quantity) ?? 0;
+    }
+  }
+  return [...perProject.values()].sort(
+    (a, b) => a.month.localeCompare(b.month) || b.node_hours - a.node_hours,
+  );
+}
+
+/** An invoice's `items`, live from the API as an array or out of a snapshot as JSON. */
+function invoiceItems(record) {
+  let items = record.items;
+  if (typeof items === 'string') {
+    try {
+      items = JSON.parse(items);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(items) ? items.filter((item) => item && typeof item === 'object') : [];
+}
+
+/**
  * Summed usage against the invoice, month by month: does the pull add up?
  *
  * Two routes to one number, from different endpoints aggregated by different
- * sides of the portal, so agreement is evidence and disagreement is a defect.
- * **This is the check that catches an unstable pull** before an inflated
- * headline can be read as a finding -- which is why the browser report shows it
- * rather than leaving it to a separate command nobody runs.
+ * sides of the portal, so agreement is evidence. **This is the check that
+ * catches an unstable pull** before an inflated headline can be read as a
+ * finding -- which is why the browser report shows it rather than leaving it to
+ * a separate command nobody runs.
  *
  * `difference` is positive when we counted usage nobody billed, which is the
  * shape a duplicated page takes.
+ *
+ * **A shortfall is not automatically a defect.** When a project's allocation is
+ * terminated the portal drops its usage rows retrospectively while its invoices
+ * stand, so the usage side comes up short by exactly what that project was
+ * billed. `missing_projects` counts the projects billed that month with no
+ * usage rows behind them and `missing_node_hours` is what they were billed;
+ * when those cover the gap the month is `project ended`, which needs no fixing
+ * and leaves no reported figure wrong, because every reported figure comes off
+ * the ledger.
+ *
+ * `billed_node_hours` is the same invoices read line by line rather than off
+ * their headers. It is what `monthlyTotals` reports, and it should equal
+ * `incurred_costs` exactly; `items_difference` says so, and anything but a zero
+ * there means a usage line has stopped looking like a usage line.
  */
+/**
+ * The `reconcile` statuses that are not a defect, and so must not raise a flag.
+ *
+ * `ok` is agreement. `no invoice` is a month the portal has not billed yet, and
+ * there is nothing to check against. `project ended` is a shortfall on the
+ * usage side that the ledger already explains -- a terminated project whose
+ * usage rows the portal has dropped -- and it leaves no reported figure wrong,
+ * because every reported figure comes off the ledger.
+ */
+export const RECONCILED = new Set(['ok', 'no invoice', 'project ended']);
+
 export function reconcile(rows, invoices, {
   customer = null,
+  scope = [],
   asOf,
   tolerance = RECONCILE_TOLERANCE,
 } = {}) {
@@ -574,6 +783,17 @@ export function reconcile(rows, invoices, {
     usage.set(month, sumOf(bucket, 'node_usage'));
   }
   const billed = new Map(invoiced(invoices, customer).map((row) => [row.month, row]));
+  const lines = new Map();
+  for (const [month, bucket] of groupBy(
+    invoicedProjects(invoices, scope, customer), (row) => row.month,
+  )) {
+    const orphans = bucket.filter((row) => row.project_code === null);
+    lines.set(month, {
+      billed_node_hours: sumOf(bucket, 'node_hours'),
+      missing_projects: orphans.length,
+      missing_node_hours: sumOf(orphans, 'node_hours'),
+    });
+  }
   const partial = monthOf(asOf);
 
   const months = [...new Set([...usage.keys(), ...billed.keys()])].sort();
@@ -585,20 +805,29 @@ export function reconcile(rows, invoices, {
     const nodeHours = usage.has(month) ? usage.get(month) : null;
     const invoice = billed.get(month);
     const costs = invoice ? invoice.incurred_costs : null;
+    const split = lines.get(month);
+    const missing = split ? split.missing_node_hours : 0;
     const gap = (nodeHours ?? 0) - (costs ?? 0);
     const allowed = Math.max(RECONCILE_FLOOR, tolerance * Math.abs(costs ?? 0));
     let status;
     if (Math.abs(gap) <= allowed) status = 'ok';
     else if (costs === null) status = 'no invoice';
     else if (nodeHours === null) status = 'no usage';
+    // The gap a terminated project leaves is exactly what it was billed, so the
+    // residual after adding it back is what the allowance judges.
+    else if (gap < 0 && Math.abs(gap + missing) <= allowed) status = 'project ended';
     else status = gap > 0 ? 'usage high' : 'usage low';
     return {
       month,
       node_hours: nodeHours,
       incurred_costs: costs,
+      billed_node_hours: split ? split.billed_node_hours : null,
+      items_difference: (split ? split.billed_node_hours : 0) - (costs ?? 0),
       difference: nodeHours === null || costs === null ? null : nodeHours - costs,
       pct_difference:
         nodeHours === null || !costs ? null : (100 * (nodeHours - costs)) / costs,
+      missing_projects: split ? split.missing_projects : 0,
+      missing_node_hours: missing,
       status,
       invoice_state: invoice ? invoice.invoice_state : null,
       is_partial: month === partial,
