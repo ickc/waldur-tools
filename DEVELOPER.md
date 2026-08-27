@@ -500,7 +500,7 @@ a credit line cancels.
 | `node_hours` | `sum(node_usage)` for the customer's projects that month, from `reports._monthly_rows` — the usage route, which is **not** what `monthly-totals` prints |
 | `incurred_costs` | `sum(incurred_costs)` over that month's invoices for the same customer, matched on the name inside `customer_details` |
 | `billed_node_hours` | the same invoices read line by line rather than off their headers — `reports.invoiced_projects` summed per month, and the figure `monthly-totals` actually prints |
-| `items_difference` | `billed_node_hours - incurred_costs`; anything but zero means a usage line has stopped looking like a usage line and the per-project split has quietly lost some |
+| `items_difference` | `billed_node_hours - incurred_costs`; anything but zero means a usage line has stopped looking like a usage line and the per-project split has quietly lost some, which `status` reports as `split incomplete` |
 | `difference` | `node_hours - incurred_costs`, **null** when a month is missing from one side entirely |
 | `pct_difference` | `100 * difference / incurred_costs`, null on a zero invoice |
 | `missing_projects` | projects billed that month with no usage rows behind them — their allocations have been terminated |
@@ -514,6 +514,16 @@ a credit line cancels.
 whichever allowance is larger; `usage high` or `usage low` when they are not;
 `no invoice` for usage in a month the portal has not invoiced, and `no usage`
 for an invoice with no usage rows behind it.
+
+`split incomplete` is checked before any of those and reported ahead of them.
+It says `items_difference` is outside the same allowance: the invoice's own
+lines no longer sum to its header, so the per-project split `monthly-totals`
+prints is short of what the portal charged. This is the one status that
+condemns a *reported* figure rather than the usage side it is compared to —
+and nothing comparing the two headers can see it, because the usage side may
+agree with the header perfectly while the split underneath it does not. A
+ledger that does not add up is not a thing to measure usage against, so it is
+answered first.
 
 `project ended` sits between `ok` and `usage low`: the usage side is short, and
 adding `missing_node_hours` back brings it inside the same allowance. That is a

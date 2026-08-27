@@ -763,7 +763,9 @@ function invoiceItems(record) {
  * `billed_node_hours` is the same invoices read line by line rather than off
  * their headers. It is what `monthlyTotals` reports, and it should equal
  * `incurred_costs` exactly; `items_difference` says so, and anything but a zero
- * there means a usage line has stopped looking like a usage line.
+ * there means a usage line has stopped looking like a usage line. That is
+ * `split incomplete`, checked ahead of everything else: a ledger that does not
+ * add up is not a thing to measure usage against.
  */
 /**
  * The `reconcile` statuses that are not a defect, and so must not raise a flag.
@@ -813,8 +815,13 @@ export function reconcile(rows, invoices, {
     const missing = split ? split.missing_node_hours : 0;
     const gap = (nodeHours ?? 0) - (costs ?? 0);
     const allowed = Math.max(RECONCILE_FLOOR, tolerance * Math.abs(costs ?? 0));
+    const billedLines = split ? split.billed_node_hours : 0;
     let status;
-    if (Math.abs(gap) <= allowed) status = 'ok';
+    // The lines are what `monthlyTotals` reports, so a split that no longer sums
+    // to its own header is checked before the usage side is checked against it:
+    // the ledger has to be sound before it is any use as the thing to compare to.
+    if (costs !== null && Math.abs(billedLines - costs) > allowed) status = 'split incomplete';
+    else if (Math.abs(gap) <= allowed) status = 'ok';
     else if (costs === null) status = 'no invoice';
     else if (nodeHours === null) status = 'no usage';
     // The gap a terminated project leaves is exactly what it was billed, so the
@@ -826,7 +833,7 @@ export function reconcile(rows, invoices, {
       node_hours: nodeHours,
       incurred_costs: costs,
       billed_node_hours: split ? split.billed_node_hours : null,
-      items_difference: (split ? split.billed_node_hours : 0) - (costs ?? 0),
+      items_difference: billedLines - (costs ?? 0),
       difference: nodeHours === null || costs === null ? null : nodeHours - costs,
       pct_difference:
         nodeHours === null || !costs ? null : (100 * (nodeHours - costs)) / costs,

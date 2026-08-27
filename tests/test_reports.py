@@ -332,6 +332,38 @@ def reconciling(tmp_path, name, allocations, usage_rows, invoice_rows):
     return snap
 
 
+def test_reconcile_flags_an_invoice_its_own_lines_no_longer_add_up_to(tmp_path, allocations):
+    """The split is what the report shows; a lost line is not something to hide.
+
+    The usage side here agrees with the invoice header exactly, so every check
+    against `incurred_costs` passes and the month would read `ok`. What is
+    wrong is underneath: one line has stopped looking like a usage line, so the
+    per-project split `monthly_totals` reports is short by what that line
+    carried, and nothing comparing the two headers can see it.
+    """
+    rows = [
+        {
+            "allocation": f"{API_URL}/api/openportal-allocations/aaa/",
+            "user": f"{API_URL}/api/users/alice/",
+            "username": "alice.abc1.brics",
+            "node_usage": "500.0",
+            "year": 2026,
+            "month": 4,
+        }
+    ]
+    lost = invoice(2026, 4, {"pa": 300.0, "pb": 200.0})
+    lost["items"][1]["measured_unit"] = "GB"  # storage, as far as the filter can tell
+    snap = reconciling(tmp_path, "split-lost", allocations, rows, [lost])
+
+    row = reports.reconcile(snap, customer="UKRI").row(0, named=True)
+    assert row["incurred_costs"] == pytest.approx(500.0)
+    assert row["node_hours"] == pytest.approx(500.0)
+    assert row["difference"] == pytest.approx(0.0)
+    assert row["billed_node_hours"] == pytest.approx(300.0)
+    assert row["items_difference"] == pytest.approx(-200.0)
+    assert row["status"] == "split incomplete"
+
+
 def test_reconcile_agrees_when_the_pull_is_clean(snapshot):
     frame = reports.reconcile(snapshot, customer="UKRI")
     by_month = {row["month"]: row for row in frame.iter_rows(named=True)}

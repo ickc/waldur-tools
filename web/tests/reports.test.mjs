@@ -57,3 +57,44 @@ describe('a month with no invoice behind it', () => {
     }
   });
 });
+
+/**
+ * The same invoices with the largest usage line no longer looking like one.
+ *
+ * The largest, because the check has an absolute floor under it -- losing a
+ * line worth less than that is deliberately not a finding.
+ */
+function withALostLine(invoices) {
+  const copy = structuredClone(invoices);
+  const lines = copy
+    .filter((inv) => inv.customer_details?.name === customer)
+    .flatMap((inv) => inv.items ?? [])
+    .filter((item) => item.measured_unit === 'hours');
+  if (!lines.length) throw new Error('the fixture has no usage line to lose');
+  const biggest = lines.reduce((a, b) => (Number(b.quantity) > Number(a.quantity) ? b : a));
+  biggest.measured_unit = 'GB'; // storage, as far as the filter can tell
+  return copy;
+}
+
+describe('an invoice its own lines no longer add up to', () => {
+  it('is flagged rather than reconciled off its header', () => {
+    const checked = reports.reconcile(rows, withALostLine(fixture.invoices), {
+      customer, scope, asOf,
+    });
+    const lost = checked.filter((row) => row.status === 'split incomplete');
+    assert.ok(lost.length > 0);
+    for (const row of lost) {
+      assert.notEqual(row.items_difference, 0);
+      // The split is what `monthlyTotals` reports, so this has to raise a flag.
+      assert.ok(!reports.RECONCILED.has(row.status));
+    }
+  });
+
+  it('reconciles as before when every line is intact', () => {
+    const checked = reports.reconcile(rows, fixture.invoices, { customer, scope, asOf });
+    for (const row of checked) {
+      assert.notEqual(row.status, 'split incomplete');
+      assert.equal(row.items_difference, 0);
+    }
+  });
+});

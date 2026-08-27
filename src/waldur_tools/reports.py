@@ -1014,13 +1014,19 @@ def reconcile(
         not a finding on its own.
     ``no usage``
         An invoice with no usage rows behind it at all.
+    ``split incomplete``
+        The invoice's own lines no longer sum to its header, so the per-project
+        split :func:`monthly_totals` reports is short of what the portal
+        charged. Checked first, and reported ahead of anything the usage side
+        says, because a ledger that does not add up is not a thing to measure
+        usage against.
 
     ``billed_node_hours`` is the same invoices read line by line rather than off
     their headers -- :func:`invoiced_projects` summed per month. It is what
     :func:`monthly_totals` reports, and it should equal ``incurred_costs``
     exactly; ``items_difference`` says so, and anything but a zero there means
     a usage line has stopped looking like a usage line and the per-project
-    split has quietly lost some.
+    split has quietly lost some. That is what ``split incomplete`` reports.
 
     ``missing_projects`` counts the projects billed in that month with no usage
     rows behind them, and ``missing_node_hours`` is what they were billed. Those
@@ -1086,6 +1092,12 @@ def reconcile(
     # The gap a terminated project leaves is exactly what that project was
     # billed, so the residual after adding it back is what the allowance judges.
     explained = (gap + pl.col("missing_node_hours").fill_null(0.0)).abs() <= allowed
+    # The lines are what `monthly_totals` reports, so a split that no longer sums
+    # to its own header is checked before the usage side is checked against it:
+    # the ledger has to be sound before it is any use as the thing to compare to.
+    split_lost = pl.col("incurred_costs").is_not_null() & (
+        (pl.col("billed_node_hours").fill_null(0.0) - pl.col("incurred_costs")).abs() > allowed
+    )
     return (
         usage.join(billed, on="month", how="full", coalesce=True)
         .join(lines, on="month", how="left")
@@ -1100,7 +1112,9 @@ def reconcile(
                 / pl.col("incurred_costs").replace(0.0, None)
             ),
             status=(
-                pl.when(gap.abs() <= allowed)
+                pl.when(split_lost)
+                .then(pl.lit("split incomplete"))
+                .when(gap.abs() <= allowed)
                 .then(pl.lit("ok"))
                 .when(pl.col("incurred_costs").is_null())
                 .then(pl.lit("no invoice"))
