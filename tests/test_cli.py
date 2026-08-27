@@ -19,7 +19,7 @@ from rich.console import Console
 from waldur_tools import cli
 from waldur_tools.cache import SnapshotError
 from waldur_tools.client import WaldurError
-from waldur_tools.config import PRIVATE_FILE, MissingTokenError
+from waldur_tools.config import PRIVATE_DIR, PRIVATE_FILE, MissingTokenError
 
 
 @pytest.fixture
@@ -100,3 +100,46 @@ def test_an_export_over_a_world_readable_file_narrows_it(tmp_path):
     target.chmod(0o644)
     cli._write(pl.DataFrame({"project_code": ["abc1"]}), target)
     assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE
+
+
+@pytest.fixture
+def slurm_run(monkeypatch):
+    """Run `slurm-jobs` with the portal and `sacct` both stubbed out."""
+    monkeypatch.setattr(cli.Snapshot, "latest", classmethod(lambda cls, root: None))
+    monkeypatch.setattr(
+        cli.report_module, "in_scope", lambda source: pl.DataFrame({"project_code": ["abc1"]})
+    )
+    monkeypatch.setattr(cli.slurm_module, "capture", lambda codes, start, cluster: pl.DataFrame({}))
+
+    def run(root, output=None):
+        cli.slurm_jobs(output=output, since="2024-01-01", cluster="i3", use=None, root=root)
+
+    return run
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod is a no-op on Windows")
+def test_the_cache_root_this_writes_into_is_made_private(tmp_path, slurm_run):
+    """It is ours, it holds a snapshot, and the directory is the boundary."""
+    root = tmp_path / "cache"
+    root.mkdir()
+    root.chmod(0o755)
+    slurm_run(root)
+    assert stat.S_IMODE(root.stat().st_mode) == PRIVATE_DIR
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod is a no-op on Windows")
+def test_a_directory_the_caller_chose_is_left_exactly_as_they_set_it(tmp_path, slurm_run):
+    """`-o` can name a group share, and none of what is already in it is ours."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o755)
+    neighbour = shared / "someone-else.txt"
+    neighbour.write_text("not ours")
+    neighbour.chmod(0o644)
+
+    slurm_run(tmp_path / "cache", output=shared / "jobs.parquet")
+
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+    assert stat.S_IMODE(neighbour.stat().st_mode) == 0o644
+    # The file this command did write is still its own business.
+    assert stat.S_IMODE((shared / "jobs.parquet").stat().st_mode) == PRIVATE_FILE

@@ -165,8 +165,11 @@ and carries on. The same goes for `~/.config/waldur/token` and anything
 `0600`), the SLURM job capture, exports from `-o`, and the generated
 `utilisation.html` are all narrowed to their owner after writing — they carry
 an organisation's spend, project names and who ran what, and on a shared login
-node the default `0644` publishes that to everyone with an account. On Windows
-`chmod` cannot express this and the calls are no-ops.
+node the default `0644` publishes that to everyone with an account. Only the
+files, and only the cache directory it creates itself: a directory you named
+with `-o` is left exactly as you set it, since everything else already in it is
+somebody else's. On Windows `chmod` cannot express this and the calls are
+no-ops.
 
 Windows works the same way from the outside. `scripts/activate.bat` sets those
 defaults there, and since cmd.exe cannot source a shell file, the token is read

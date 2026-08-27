@@ -213,7 +213,12 @@ def slurm_jobs(
     frame = slurm_module.capture(codes, start=since, cluster=cluster)
     target = output or (directory / slurm_module.JOBS_FILENAME)
     target.parent.mkdir(parents=True, exist_ok=True)
-    restrict(target.parent, PRIVATE_DIR)
+    if output is None:
+        # Only the cache root, which is ours. A caller's `--output` can name any
+        # directory they like -- the one they are standing in, a group share --
+        # and taking that to 0700 would revoke everyone else's access to
+        # everything already in it, none of which this command wrote.
+        restrict(target.parent, PRIVATE_DIR)
     frame.write_parquet(target)
     restrict(target)
 
