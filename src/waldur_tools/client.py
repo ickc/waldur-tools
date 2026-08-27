@@ -15,6 +15,14 @@ Why raw JSON rather than the generated per-endpoint functions? Two reasons:
 The typed API remains one attribute away: pass :attr:`WaldurClient.raw` to any
 ``waldur_api_client.api.*.sync`` function when you want models instead of dicts.
 
+**The token goes to exactly one origin.** It is a bearer credential for one
+deployment, and the two ways it could reach another are a ``Link: rel=next``
+header naming a different host and a redirect to one. Both are the server's
+choice rather than ours, so :meth:`WaldurClient._get` checks the origin of every
+URL before the request and of every response after it, against the one
+``WALDUR_API_URL`` names. :class:`waldur_tools.config.Settings` also refuses a
+plaintext ``http://`` URL for anything but a Waldur on this machine.
+
 **Not every list endpoint can be paged straight through.** ``page``/``page_size``
 is ``LIMIT``/``OFFSET`` underneath, and that is only well defined over a totally
 ordered queryset. ``openportal-allocation-user-usage`` is not one, and paging it
@@ -35,7 +43,7 @@ import httpx
 from waldur_api_client.client import AuthenticatedClient
 from waldur_api_client.utils import parse_link_header
 
-from .config import Settings
+from .config import Settings, origin_of
 
 JsonDict = dict[str, Any]
 
@@ -157,11 +165,41 @@ class WaldurClient:
 
     # -- reading -----------------------------------------------------------
 
+    def _off_origin(self, url: str, how: str) -> WaldurError:
+        """Said when something tried to send this token somewhere it does not belong."""
+        return WaldurError(
+            f"Refusing to send the API token to {origin_of(url)}: this run is "
+            f"configured for {self.settings.origin} and the token is a bearer "
+            f"credential for that deployment alone. The URL came {how}. If the "
+            "portal really has moved, set WALDUR_API_URL and issue a token there."
+        )
+
     def _get(self, url: str, params: JsonDict | None = None) -> httpx.Response:
+        """One GET, held to the configured origin on the way out and on the way back.
+
+        **Every URL this client fetches is checked, not only the ones it built.**
+        Most come from :meth:`_url`, but a paginated walk follows an *absolute*
+        URL out of the portal's ``Link`` header, and that is a URL the server
+        chose. Nothing in the protocol stops it naming another host, and the
+        walk would attach the ``Authorization`` header to it -- so the token
+        would reach an origin nobody configured, on the strength of one response
+        header. It is checked before the request rather than trusted because it
+        arrived over TLS from the right place.
+
+        The response's own URL is checked too, because ``follow_redirects`` is
+        on and a 302 is the other way to be sent somewhere else. httpx drops the
+        ``Authorization`` header across a cross-origin redirect, so the token
+        does not leak that way, but the request still goes -- and a portal that
+        redirects us off-origin is not a thing to follow quietly.
+        """
+        if origin_of(url) != self.settings.origin:
+            raise self._off_origin(url, "from a Link header or a caller, not from WALDUR_API_URL")
         try:
             response = self.http.get(url, params=params)
         except httpx.HTTPError as error:  # network-level
             raise WaldurError(f"GET {url} failed: {error}") from error
+        if origin_of(str(response.url)) != self.settings.origin:
+            raise self._off_origin(str(response.url), "from a redirect")
         if response.status_code != httpx.codes.OK:
             raise WaldurError(f"GET {url} returned {response.status_code}: {response.text[:300]}")
         return response
@@ -226,7 +264,9 @@ class WaldurClient:
             yield from payload
 
             seen.add(str(response.url))
-            # Subsequent URLs from the Link header already carry the query string.
+            # Subsequent URLs from the Link header already carry the query
+            # string. They are also chosen by the server, so `_get` holds each
+            # one to the configured origin before attaching the token to it.
             url = parse_link_header(response.headers.get("Link", "")).get("next")
             params = None
             if url in seen:

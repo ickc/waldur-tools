@@ -30,7 +30,7 @@
 
 import { MonthCache } from './store.js';
 import {
-  DEFAULT_PAGE_SIZE, WaldurClient, WaldurError, pullByMonth,
+  DEFAULT_PAGE_SIZE, WaldurClient, WaldurError, originOf, pullByMonth,
 } from './api.js';
 import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
@@ -705,26 +705,41 @@ function parseShare(text) {
  * which is held in memory and dropped when the browser closes. Never
  * `localStorage`: a token that outlives the browser is a token still sitting on
  * disk long after the portal expired it hours later.
+ *
+ * **The origin is remembered with it, and checked on the way back out.** A
+ * token is a bearer credential for one deployment; the API URL box defaults to
+ * this one's, so a token remembered while reading a second Waldur would
+ * otherwise be picked up on the next visit and sent to the default. That is one
+ * deployment's credential handed to another, from nothing but a page reload.
+ * Storing the pair makes the two inseparable, and a stored token whose origin
+ * does not match the one about to be read is dropped rather than reused.
  */
 const session = {
-  async get() {
+  async get(apiUrl) {
     try {
-      const stored = await chrome.storage.session.get('token');
-      return stored.token ?? null;
+      const stored = await chrome.storage.session.get(['token', 'origin']);
+      if (!stored.token) return null;
+      const wanted = originOf(apiUrl);
+      // No origin stored is a token remembered by an older version, which was
+      // remembered without one. It cannot be shown to belong here, so it is not
+      // used here -- a re-paste, against the credential going somewhere it was
+      // never issued for.
+      if (!stored.origin || wanted === null || stored.origin !== wanted) return null;
+      return stored.token;
     } catch {
       return null;
     }
   },
-  async set(token) {
+  async set(token, apiUrl) {
     try {
-      await chrome.storage.session.set({ token });
+      await chrome.storage.session.set({ token, origin: originOf(apiUrl) });
     } catch {
       // Not being able to remember it is a re-paste, not a failure.
     }
   },
   async clear() {
     try {
-      await chrome.storage.session.remove('token');
+      await chrome.storage.session.remove(['token', 'origin']);
     } catch {
       // As above.
     }
@@ -869,7 +884,7 @@ async function start() {
     );
   }
 
-  if (el('remember').checked) await session.set(token);
+  if (el('remember').checked) await session.set(token, apiUrl);
   else await session.clear();
 
   await build({ token, apiUrl, fromPortal: false });
@@ -1046,7 +1061,9 @@ async function boot() {
     return;
   }
 
-  const stored = await session.get();
+  // Keyed on the URL about to be read, so a token remembered against another
+  // deployment is simply not found rather than quietly reused against this one.
+  const stored = apiUrl ? await session.get(apiUrl) : null;
   if (stored) {
     el('token').value = stored;
     el('remember').checked = true;

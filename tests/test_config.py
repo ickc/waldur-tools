@@ -8,8 +8,10 @@ import pytest
 
 from waldur_tools.config import (
     PRIVATE_FILE,
+    InsecureApiUrlError,
     MissingTokenError,
     Settings,
+    origin_of,
     resolve_token,
     restrict,
 )
@@ -170,3 +172,35 @@ def test_an_envrc_local_anyone_can_read_is_reported_too(monkeypatch, tmp_path):
 
     with pytest.warns(UserWarning, match=re.escape("chmod 600")):
         assert resolve_token() == "from-envrc"
+
+
+# -- where the token may go --------------------------------------------------
+
+
+def test_origin_ignores_everything_a_token_is_not_scoped_to():
+    """Path and query decide nothing about who receives the Authorization header."""
+    assert origin_of("https://Portal.Example.Test/api/users/?page=2") == (
+        "https://portal.example.test"
+    )
+    assert origin_of("https://portal.example.test:8443/api/") == (
+        "https://portal.example.test:8443"
+    )
+    # A different port is a different origin, as it is everywhere else.
+    assert origin_of("https://portal.example.test") != origin_of("https://portal.example.test:8443")
+
+
+def test_plain_http_to_a_remote_portal_is_refused(tmp_path):
+    """The token is a bearer credential; http:// puts it on the wire in clear."""
+    with pytest.raises(InsecureApiUrlError, match="plain HTTP"):
+        Settings(api_url="http://portal.example.test", token="t", cache_dir=tmp_path)
+
+
+def test_plain_http_to_this_machine_is_allowed(tmp_path):
+    """Refusing it would leave nothing to develop or test against but production."""
+    settings = Settings(api_url="http://localhost:8000", token="t", cache_dir=tmp_path)
+    assert settings.origin == "http://localhost:8000"
+
+
+def test_something_that_is_not_a_url_is_refused_before_the_first_request(tmp_path):
+    with pytest.raises(InsecureApiUrlError, match="http\\(s\\) URL"):
+        Settings(api_url="portal.example.test", token="t", cache_dir=tmp_path)

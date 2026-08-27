@@ -12,7 +12,10 @@ what a colleague needs before touching anything.
 ### Three ways to consume it, one picture
 
 Everything here is **read-only** against the portal — no command in this repo
-writes anything back to Waldur.
+writes anything back to Waldur. That is a property of this code, not of the
+token: a Waldur personal access token carries the scopes and roles of the
+account that issued it, so what *it* can do is whatever you can do. Treat it
+accordingly.
 
 | | How you run it | Token | Who it is for |
 | --- | --- | --- | --- |
@@ -61,8 +64,10 @@ proposal is to keep the extension and retire the Python side, not the reverse.
   repeating it.
 - **The one thing that is not low stakes is secrets.** Hence the hard rule that
   nothing snapshot-derived — figures, project codes, usernames — goes into git
-  (see [CLAUDE.md](CLAUDE.md)), and no token is ever committed. Even that is
-  bounded: portal tokens are read-only and expire within hours.
+  (see [CLAUDE.md](CLAUDE.md)), and no token is ever committed. What bounds the
+  damage is the hours-long expiry, and that the token is only ever sent to the
+  one origin `WALDUR_API_URL` names — not that it is read-only, which it is
+  not: a portal token carries its holder's own scopes and roles.
 
 ### The number people misread
 
@@ -91,16 +96,22 @@ Four properties are what make that sound rather than merely convenient:
   inferred from that same tab. When the URL cannot be worked out, the extension
   shows its gate with the URL box blank rather than falling back to a built-in
   default — precisely so one deployment's credential can never be sent to
-  another.
+  another. That is enforced rather than arranged: every request checks the
+  origin it is about to be sent to, including the absolute URLs the portal
+  itself names in its `Link` headers, and a remembered token is stored with the
+  origin it was issued for and dropped rather than reused against a different
+  one.
 - **It is verified, not assumed.** `waldur/auth/token` is a HomePort internal,
   not a documented API, and a Waldur upgrade may rename it. So the token is put
   to `users/me/` before anything is built, and one the portal rejects demotes
   cleanly to the paste box with the reason on it.
-- **It is cheap to lose.** Read-only, about an hour of life, and a 401
-  mid-session is answered by re-reading the portal tab — whose front end has
-  been refreshing the token all along — and retrying once.
+- **It is cheap to lose.** About an hour of life, and a 401 mid-session is
+  answered by re-reading the portal tab — whose front end has been refreshing
+  the token all along — and retrying once. Not *harmless* to lose: it is your
+  own credential with your own roles on it, which is why the hour and the single
+  origin are the properties that matter.
 
-Worst case is therefore a read-only credential with an hour to live, held in
+Worst case is therefore your own credential with an hour to live, held in
 memory, sent to exactly one origin. [web/README.md](web/README.md) has the
 detail.
 

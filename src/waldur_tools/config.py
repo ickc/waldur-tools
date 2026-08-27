@@ -8,6 +8,7 @@ import stat
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import platformdirs
 
@@ -169,14 +170,63 @@ def resolve_token() -> str:
     raise MissingTokenError
 
 
+class InsecureApiUrlError(ValueError):
+    """Raised when the configured API URL would put the token on the wire in clear."""
+
+
+#: Hosts a plaintext ``http://`` API URL is allowed for. A Waldur running on the
+#: same machine -- a developer's own, or a test double -- never leaves it, and
+#: refusing that would make the package untestable against anything but the real
+#: deployment. Everything else is a token crossing a network unencrypted.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def origin_of(url: str) -> str:
+    """``scheme://host[:port]``, lowercased -- the identity a token is scoped to.
+
+    Two URLs share an origin when this matches. The path, the query and any
+    credentials in the URL are deliberately not part of it: what decides
+    whether the ``Authorization`` header may be attached is who is going to
+    receive it, and that is the scheme, the host and the port.
+    """
+    parts = urlsplit(url)
+    return f"{parts.scheme.lower()}://{(parts.netloc or '').lower()}"
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """Everything the client and cache need to run."""
+    """Everything the client and cache need to run.
+
+    ``api_url`` is the single origin this run may talk to. It is checked here
+    rather than at each call site so there is one definition of "the portal",
+    and :attr:`origin` is what every request is held to -- see
+    :meth:`waldur_tools.client.WaldurClient._get`.
+    """
 
     api_url: str
     token: str
     cache_dir: Path
     timeout: float = 60.0
+
+    def __post_init__(self) -> None:
+        parts = urlsplit(self.api_url)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise InsecureApiUrlError(
+                f"WALDUR_API_URL must be an http(s) URL with a host; got {self.api_url!r}."
+            )
+        host = (parts.hostname or "").lower()
+        if parts.scheme != "https" and host not in LOOPBACK_HOSTS:
+            raise InsecureApiUrlError(
+                f"Refusing to send the API token to {self.api_url!r} over plain HTTP. "
+                "The token is a bearer credential and http:// puts it on the wire in "
+                "clear, readable by anything between here and the portal. Use https://, "
+                "or point at a Waldur on this machine if you are testing."
+            )
+
+    @property
+    def origin(self) -> str:
+        """The one ``scheme://host[:port]`` this run's token is ever sent to."""
+        return origin_of(self.api_url)
 
     @classmethod
     def from_env(cls) -> Settings:

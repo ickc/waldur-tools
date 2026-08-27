@@ -418,3 +418,74 @@ def test_by_month_rejects_a_month_whose_count_header_goes_missing(settings):
         pytest.raises(WaldurError, match="no readable X-Result-Count header"),
     ):
         list(client.iter_list_by_month("openportal-allocation-user-usage", today=date(2026, 1, 5)))
+
+
+# -- where the token may go --------------------------------------------------
+#
+# It is a bearer credential for one deployment. The two ways it could reach
+# another are both the server's choice rather than ours: a `Link: rel=next`
+# naming a different host, and a redirect to one. Neither is hypothetical --
+# the walk follows an absolute URL out of that header, and `follow_redirects`
+# is on -- so both are checked against `WALDUR_API_URL` and neither is trusted
+# for having arrived over TLS from the right place.
+
+ELSEWHERE = "https://collector.example.invalid"
+
+
+@respx.mock
+def test_pagination_will_not_follow_a_link_header_to_another_host(settings):
+    respx.get(LIST_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"uuid": "1"}],
+            headers={
+                "X-Result-Count": "2",
+                "Link": f'<{ELSEWHERE}/api/openportal-associations/?page=2>; rel="next"',
+            },
+        )
+    )
+    stolen = respx.get(f"{ELSEWHERE}/api/openportal-associations/").mock(
+        return_value=httpx.Response(200, json=[{"uuid": "2"}])
+    )
+
+    with (
+        WaldurClient(settings) as client,
+        pytest.raises(WaldurError, match="Refusing to send the API token"),
+    ):
+        list(client.iter_list("openportal-associations"))
+    # Refused before the request, not after reading the answer.
+    assert not stolen.called
+
+
+@respx.mock
+def test_a_redirect_off_the_configured_origin_is_refused(settings):
+    respx.get(ME_URL).mock(
+        return_value=httpx.Response(302, headers={"Location": f"{ELSEWHERE}/api/users/me/"})
+    )
+    respx.get(f"{ELSEWHERE}/api/users/me/").mock(
+        return_value=httpx.Response(200, json={"username": "someone-else"})
+    )
+
+    with (
+        WaldurClient(settings) as client,
+        pytest.raises(WaldurError, match="from a redirect"),
+    ):
+        client.me()
+
+
+@respx.mock
+def test_a_link_header_back_to_the_same_origin_is_followed_as_before(settings):
+    """The guard must not cost the ordinary case, which is every real pull."""
+    page_two = f"{LIST_URL}?page=2"
+    respx.get(LIST_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json=[{"uuid": "1"}],
+                headers={"X-Result-Count": "2", "Link": f'<{page_two}>; rel="next"'},
+            ),
+            httpx.Response(200, json=[{"uuid": "2"}], headers={"X-Result-Count": "2"}),
+        ]
+    )
+    with WaldurClient(settings) as client:
+        assert [row["uuid"] for row in client.iter_list("openportal-associations")] == ["1", "2"]

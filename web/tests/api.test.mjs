@@ -20,7 +20,7 @@ import { after, describe, it } from 'node:test';
 
 import {
   MONTH_ATTEMPTS, WaldurClient, WaldurError, assertMonthFilterWorks, countRepeats, monthsUntil,
-  parseLinkHeader, pullByMonth, pullMonth,
+  originOf, parseLinkHeader, pullByMonth, pullMonth,
 } from '../src/api.js';
 
 const API = 'https://portal.example.test';
@@ -529,5 +529,72 @@ describe('recovering from an expired token', () => {
     const seen = expiring('fresh');
     await assert.rejects(() => client().list('customers'), WaldurError);
     assert.deepEqual(seen, ['secret']);
+  });
+});
+
+
+// --------------------------------------------------------------------------
+
+describe('where the token may go', () => {
+  // It is a bearer credential for one deployment. The way it could reach
+  // another is a `Link: rel=next` naming a different host -- a URL the *server*
+  // chose, which the walk follows as an absolute URL with the Authorization
+  // header attached. Not hypothetical: nothing in the protocol stops it.
+  const ELSEWHERE = 'https://collector.example.invalid';
+
+  it('reads an origin, and nothing about the path', () => {
+    assert.equal(originOf('https://portal.example.test/api/users/?page=2'),
+      'https://portal.example.test');
+    // A different port is a different origin, as it is everywhere else.
+    assert.notEqual(originOf('https://portal.example.test'),
+      originOf('https://portal.example.test:8443'));
+    assert.equal(originOf('not a url'), null);
+  });
+
+  it('will not follow a Link header to another host', async () => {
+    const asked = [];
+    globalThis.fetch = async (url) => {
+      asked.push(String(url));
+      if (String(url).startsWith(ELSEWHERE)) {
+        return reply([{ uuid: '2' }], { headers: { 'x-result-count': '2' } });
+      }
+      return reply([{ uuid: '1' }], {
+        headers: {
+          'x-result-count': '2',
+          link: `<${ELSEWHERE}/api/customers/?page=2>; rel="next"`,
+        },
+      });
+    };
+
+    await assert.rejects(
+      () => client().list('customers'),
+      (error) => error instanceof WaldurError
+        && /Refusing to send the portal token/.test(error.message),
+    );
+    // Refused before the request, not after reading the answer.
+    assert.ok(!asked.some((url) => url.startsWith(ELSEWHERE)));
+  });
+
+  it('still follows a Link header back to its own origin', async () => {
+    // The guard must not cost the ordinary case, which is every real pull.
+    let page = 0;
+    globalThis.fetch = async () => {
+      page += 1;
+      return page === 1
+        ? reply([{ uuid: '1' }], {
+          headers: {
+            'x-result-count': '2',
+            link: `<${API}/api/customers/?page=2>; rel="next"`,
+          },
+        })
+        : reply([{ uuid: '2' }], { headers: { 'x-result-count': '2' } });
+    };
+    const rows = await client().list('customers');
+    assert.deepEqual(rows.map((row) => row.uuid), ['1', '2']);
+  });
+
+  it('refuses to be built for something that is not a URL at all', () => {
+    assert.throws(() => new WaldurClient({ apiUrl: 'portal.example.test', token: 't' }),
+      WaldurError);
   });
 });
