@@ -12,7 +12,9 @@ that says something else -- otherwise the asset's name and the extension's own
 reported version drift apart, and the reader is the one who finds out.
 
 Paths inside the archive are relative to `web/`, because Chrome requires
-`manifest.json` at the root of what it loads.
+`manifest.json` at the root of what it loads, and are written with forward
+slashes on every platform -- the zip format says so, and Chrome would read a
+backslash as part of the name rather than as a directory.
 """
 
 from __future__ import annotations
@@ -61,9 +63,15 @@ def main() -> None:
     out = DIST / f"isambard-utilisation-{version}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in contents():
-            entry = zipfile.ZipInfo(str(path.relative_to(WEB)), date_time=EPOCH)
+            entry = zipfile.ZipInfo(path.relative_to(WEB).as_posix(), date_time=EPOCH)
             entry.compress_type = zipfile.ZIP_DEFLATED
             entry.external_attr = 0o644 << 16
+            # ZipInfo takes this from whatever host it is constructed on -- 0
+            # on Windows, 3 (unix) everywhere else -- and writes it into every
+            # central-directory entry, so the same source would otherwise pack
+            # into two different archives. 3 is also what makes the permission
+            # bits set above mean anything to a reader.
+            entry.create_system = 3
             archive.writestr(entry, path.read_bytes())
 
     print(f"wrote {out.relative_to(ROOT)} ({out.stat().st_size / 1e6:.1f} MB)")

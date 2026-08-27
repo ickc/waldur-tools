@@ -899,8 +899,12 @@ def _storage_staleness(current: pl.DataFrame) -> str:
     days = (date.today() - read).days
     if days < STALE_DAYS:
         return ""
+    # `read.day` rather than a `%-d`, which is a glibc extension that Windows
+    # rejects outright. It also has to stay an unpadded day: `web/src/page.js`
+    # writes the same sentence with `day: 'numeric'`, and the two reports say
+    # the same thing about the same disks.
     return (
-        f" <strong>These readings stop on {read:%-d %B %Y}</strong>, {days} days before "
+        f" <strong>These readings stop on {read.day} {read:%B %Y}</strong>, {days} days before "
         "this page was built: the collector behind them has not reported since. Read the "
         "columns as history rather than as the state of the disks now."
     )

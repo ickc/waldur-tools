@@ -32,6 +32,11 @@ gitignored and never committed; `scripts/activate.sh` (committed, secret-free)
 sources it on every `pixi run` and `pixi shell`, along with sensible defaults
 for `WALDUR_API_URL` and `WALDUR_CACHE_DIR`.
 
+Windows works the same way from the outside. `scripts/activate.bat` sets those
+defaults there, and since cmd.exe cannot source a shell file, the token is read
+out of `.envrc.local` by the package itself — so the line above, and rewriting
+it when the token expires, is the same on every platform.
+
 > **Portal tokens expire within hours, not days.**
 > A token that worked this morning will not work this afternoon, so rewriting
 > `.envrc.local` before a session is part of the routine rather than a one-off.

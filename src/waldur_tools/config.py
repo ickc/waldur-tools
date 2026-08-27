@@ -13,8 +13,10 @@ DEFAULT_API_URL = "https://portal-api.isambard.ac.uk"
 _TOKEN_HELP = """\
 No Waldur API token found.
 
-Set it in .envrc.local at the repository root. The file is gitignored, and pixi
-sources it on every command via scripts/activate.sh:
+Set it in .envrc.local at the repository root. The file is gitignored, and it
+is read on every command -- pixi sources it through scripts/activate.sh, and on
+Windows, where cmd.exe cannot source a shell file, this module reads the token
+out of it directly:
 
     echo 'export WALDUR_API_TOKEN=<your token>' > .envrc.local
 
@@ -43,24 +45,54 @@ def _read_token_file(path: Path) -> str | None:
     return token or None
 
 
+def _token_from_envrc(path: Path) -> str | None:
+    """The token out of a ``.envrc.local``, which is a shell file, not a token file.
+
+    ``scripts/activate.sh`` sources that file, so on Unix the token is in the
+    environment before this module runs and this never fires. cmd.exe cannot
+    source a shell file, so on Windows this is what makes the documented
+    workflow -- write the token into .envrc.local, run the next command -- work
+    the same way there.
+
+    Deliberately not a shell. It takes ``WALDUR_API_TOKEN=...`` off a line and
+    ignores everything else, rather than interpreting a file that is allowed to
+    contain arbitrary shell. The last assignment wins, as it would in a shell.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    found = None
+    for line in lines:
+        name, sep, value = line.strip().removeprefix("export ").partition("=")
+        if sep and name.strip() == "WALDUR_API_TOKEN":
+            found = value.strip().strip("\"'") or None
+    return found
+
+
 def resolve_token() -> str:
     """Find the API token, preferring the environment over on-disk files.
 
-    Order: ``WALDUR_API_TOKEN``, then ``WALDUR_TOKEN_FILE``, then
-    ``~/.config/waldur/token``.
+    Order: ``WALDUR_API_TOKEN``, then ``WALDUR_TOKEN_FILE``, then the project's
+    ``.envrc.local``, then ``~/.config/waldur/token``.
     """
     token = os.environ.get("WALDUR_API_TOKEN", "").strip()
     if token:
         return token
 
-    candidates = []
-    if env_file := os.environ.get("WALDUR_TOKEN_FILE"):
-        candidates.append(Path(env_file).expanduser())
-    candidates.append(Path(platformdirs.user_config_dir("waldur")) / "token")
+    env_file = os.environ.get("WALDUR_TOKEN_FILE")
+    if env_file and (found := _read_token_file(Path(env_file).expanduser())):
+        return found
 
-    for candidate in candidates:
-        if found := _read_token_file(candidate):
-            return found
+    # Only the project pixi is running in, never a .envrc.local that happens to
+    # be in whatever directory the command was typed from.
+    root = os.environ.get("PIXI_PROJECT_ROOT")
+    if root and (found := _token_from_envrc(Path(root) / ".envrc.local")):
+        return found
+
+    if found := _read_token_file(Path(platformdirs.user_config_dir("waldur")) / "token"):
+        return found
 
     raise MissingTokenError
 

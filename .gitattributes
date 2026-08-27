@@ -1,0 +1,12 @@
+# Line endings are content here, not a local preference.
+#
+# `scripts/pack_web.py` writes the release archive from whatever is on disk and
+# pins every other source of variation -- entry order, timestamps, permissions --
+# so that an archive built on one machine can be compared against one built on
+# another. A checkout that turned `web/src/*.js` into CRLF would defeat that on
+# its own. The golden files under `web/tests/` are compared as text by both
+# sides of the parity test for the same reason.
+* text=auto eol=lf
+
+# Except the one file that is read by cmd.exe, which is entitled to its CRLF.
+*.bat text eol=crlf

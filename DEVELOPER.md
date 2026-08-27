@@ -1110,6 +1110,61 @@ around each figure, and the two quota heatmaps are the only figures there with
 a title *inside* the plot — and six buttons beside it. They now use the same
 geometry, and `tests/test_viz.py` pins it the same way.
 
+## Platforms
+
+`tool.pixi.workspace.platforms` names five, and `.github/workflows/ci.yml` runs
+the whole check on one runner for each of them — `ubuntu-latest` for linux-64,
+`ubuntu-24.04-arm` for linux-aarch64, `macos-latest` for osx-arm64,
+`macos-26-intel` for osx-64 and `windows-latest` for win-64. A platform that is
+solved for but never run on is a claim rather than a fact. The matrix does not
+stop at the first failure, because which of them are healthy is the question it
+is being asked, and every step in it is a `pixi run <task>` — the runners do not
+agree on a shell, pixi's own shell is the same everywhere, and `pixi run check`
+locally runs the same list in the same order.
+
+Almost nothing here is particular to a machine: the package is pure Python, the
+extension is loaded from source with no build step, and `sacct` — the only thing
+shelled out to — exists on the cluster and nowhere else. Three smaller things
+did have to be ported, and they are the ones to remember when writing more.
+
+**An activation script is a shell script, and cmd.exe is not that shell.** So
+there are two, selected by pixi target: `scripts/activate.sh` on unix,
+`scripts/activate.bat` on win-64. They set the same two defaults,
+`WALDUR_API_URL` and `WALDUR_CACHE_DIR`, and neither contains a secret. What the
+batch file cannot do is *source* `.envrc.local`, which is a shell file and is
+where the token lives — so `config._token_from_envrc` reads the token out of it
+directly instead. That runs on every platform rather than only on the one that
+needs it, which is what puts it under test; it is deliberately not a shell,
+taking `WALDUR_API_TOKEN=` off a line and ignoring everything else in a file
+that is allowed to contain arbitrary shell. The environment still wins over the
+file, so on unix, where the shell has already sourced it, this never fires.
+
+**`%-d` is a glibc extension, not a date format.** Windows raises `ValueError:
+Invalid format string` on it, and because the stale-storage sentence is built
+during `viz.render`, that took the entire page down rather than one line of it.
+Unpadded numbers are worth spelling out of the date object — `{read.day}` — and
+`web/src/page.js` asks for the same thing with `day: 'numeric'`, so the two
+reports agree on what the sentence looks like.
+
+**A generated file must come out the same bytes wherever it was generated.**
+Both golden files under `web/tests/` and the vendored plotly bundle are written
+with an explicit `newline="\n"` rather than Python's platform default; entry
+names in the release archive are `as_posix()` because the zip format says so and
+Chrome would read a backslash as part of a file name, and each entry's
+`create_system` is written rather than inherited, because `ZipInfo` takes it
+from the host — 0 on Windows, 3 everywhere else — into a field nobody reads and
+every byte counts; and `.gitattributes` pins the checkout to LF so that none of
+it depends on which machine cloned the repository.
+
+The bundle is `get_plotlyjs()` out of the *installed* plotly, so this also asks
+that `pixi.lock` resolve one plotly version for all five platforms. A solve that
+touches only some of them can leave the rest behind — adding the two new
+platforms did exactly that, and for a while two of the five would have vendored
+a different major version of plotly.js than the other three. Nothing checks
+this; `pixi update <package>` re-solves every platform together, which is what
+keeps it true. The claim that two builds of the extension can be compared is
+only true if all of that holds.
+
 ## Releasing the extension
 
 The extension ships as a zip on a GitHub release, built by

@@ -50,7 +50,7 @@ packages = ["src/waldur_tools"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-aarch64", "linux-64", "osx-arm64"]
+platforms = ["linux-aarch64", "linux-64", "osx-arm64", "osx-64", "win-64"]
 
 [tool.pixi.dependencies]
 python = ">=3.11,<3.14"
@@ -67,16 +67,29 @@ mypy = ">=1.10"
 ruff = ">=0.6"
 respx = ">=0.21"
 
-# Runs on every `pixi run` and `pixi shell`, and is where the API token comes
-# from -- so pixi on its own is enough to use this tool. direnv is optional.
-[tool.pixi.activation]
+# Runs on every `pixi run` and `pixi shell`, and is where the cache directory
+# and the API URL come from -- so pixi on its own is enough to use this tool.
+# direnv is optional. An activation script is a shell script, and Windows does
+# not have the same shell, so there are two of them; they set the same
+# variables, and the token is read out of .envrc.local by waldur_tools.config
+# on the platform whose shell cannot source it.
+[tool.pixi.target.unix.activation]
 scripts = ["scripts/activate.sh"]
+
+[tool.pixi.target.win-64.activation]
+scripts = ["scripts/activate.bat"]
 
 [tool.pixi.tasks]
 cli = "waldur-tools"
 test = "pytest"
+# Coverage is worth having in CI and not worth paying for on every local run,
+# so it is a task of its own rather than an option on `test`.
+test-cov = "pytest --cov=waldur_tools --cov-report=term-missing"
 lint = "ruff check src tests"
 fmt = "ruff format src tests"
+# The same formatting, reported rather than applied. CI has nothing to apply it
+# to, and a task means the check is spelled once instead of once per platform.
+fmt-check = "ruff format --check src tests"
 typecheck = "mypy src"
 
 # The browser extension. `web-vendor` writes the plotly bundle it loads, out of
@@ -85,13 +98,20 @@ typecheck = "mypy src"
 # arithmetic against this package's, and must run after `test`, which is what
 # regenerates the golden files it reads.
 web-vendor = { cmd = "python scripts/vendor_plotly.py" }
-test-web = { cmd = "node --test 'web/tests/*.test.mjs'", depends-on = ["test"] }
+# `node-test` is the node half on its own, because CI reaches it having already
+# run pytest -- with coverage -- and would otherwise run the suite twice.
+node-test = { cmd = "node --test 'web/tests/*.test.mjs'" }
+test-web = { depends-on = ["test", "node-test"] }
 # Writes the release asset into dist/. The plotly bundle is generated and not
 # committed, so packing depends on vendoring it -- an archive built without it
 # would be an extension that cannot draw.
 web-pack = { cmd = "python scripts/pack_web.py", depends-on = ["web-vendor"] }
 
-check = { depends-on = ["lint", "typecheck", "test", "test-web"] }
+# Every check CI runs, in the order CI runs it, so a green `check` locally
+# means a green CI on this platform. Coverage is the one deliberate difference:
+# CI's test step is `test-cov`, which runs this same suite and additionally
+# reports on it, and nothing passes or fails on the report.
+check = { depends-on = ["lint", "fmt-check", "typecheck", "test", "node-test"] }
 
 # --------------------------------------------------------------------------
 # tooling

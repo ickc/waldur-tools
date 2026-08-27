@@ -5,9 +5,48 @@ on:
     branches: [main]
   pull_request:
 
+# Five runners go out per push, so a branch that is pushed to twice in a minute
+# is holding ten of them for one answer. The superseded run is cancelled -- but
+# only on a pull request, where the last push is the only one anybody reads. A
+# run on `main` is the record of whether that commit was healthy on every
+# platform, and the next push does not make the previous commit's answer moot.
+#
+# Which is why `main` groups by commit rather than by branch. A group holds one
+# run at the front of the queue, so a second push while the first is still
+# running would evict the one waiting behind it -- not cancelled in progress,
+# simply never started, and that commit has no answer on any platform. A group
+# per commit cannot collide with itself; a pull request keeps the stable group
+# that makes the cancellation above possible.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # One runner per platform in `tool.pixi.workspace.platforms`: a platform
+    # that is solved for but never run on is a claim, not a fact.
+    #   ubuntu-latest    linux-64
+    #   ubuntu-24.04-arm linux-aarch64
+    #   macos-latest     osx-arm64
+    #   macos-26-intel   osx-64
+    #   windows-latest   win-64
+    # Two of them carry a version because GitHub publishes no `-latest` alias
+    # for arm Linux or for Intel macOS; those two name the newest image that is
+    # out of preview, and have to be moved by hand when a newer one ships.
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform's result, not just the first one to fail -- the whole
+      # point here is knowing which of them are healthy.
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-26-intel
+          - windows-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -16,21 +55,24 @@ jobs:
         with:
           cache: true
 
+      # Every step is a pixi task, so each one is a single word with nothing to
+      # quote -- the runners do not agree on a shell, and pixi's own shell is
+      # the same on all of them.
       - name: Lint
         run: pixi run lint
 
       - name: Format check
-        run: pixi run ruff format --check src tests
+        run: pixi run fmt-check
 
       - name: Type check
         run: pixi run typecheck
 
       - name: Test
-        run: pixi run pytest --cov=waldur_tools --cov-report=term-missing
+        run: pixi run test-cov
 
       # Runs after the suite above, which is what regenerates the golden files
       # the parity test reads -- and which fails first if they were left
-      # uncommitted. `pixi run test-web` would re-run pytest for that reason, so
-      # the runner is invoked directly here.
+      # uncommitted. `test-web` would re-run pytest for that reason, so the node
+      # half is invoked on its own here.
       - name: Web tests
-        run: pixi run node --test 'web/tests/*.test.mjs'
+        run: pixi run node-test
