@@ -20,6 +20,9 @@ backslash as part of the name rather than as a directory.
 `web/`, and is copied to the root of the archive. The zip is how most people
 who use the extension will ever receive this code -- they load the unpacked
 folder and never see the repository -- so the terms have to travel with it.
+The same reasoning covers `web/vendor/plotly.LICENSE`, plotly's own MIT terms,
+which `web-vendor` writes beside the bundle and which pack in with the rest of
+`vendor/`.
 """
 
 from __future__ import annotations
@@ -90,8 +93,9 @@ def _shown(path: Path, root: Path) -> str:
 
 def main() -> None:
     version = json.loads((WEB / "manifest.json").read_text(encoding="utf-8"))["version"]
-    if not (WEB / "vendor" / "plotly.min.js").exists():
-        raise SystemExit("web/vendor/plotly.min.js is missing -- run `pixi run web-vendor`")
+    for generated in ("plotly.min.js", "plotly.LICENSE"):
+        if not (WEB / "vendor" / generated).exists():
+            raise SystemExit(f"web/vendor/{generated} is missing -- run `pixi run web-vendor`")
 
     DIST.mkdir(exist_ok=True)
     out = DIST / f"isambard-utilisation-{version}.zip"

@@ -1255,10 +1255,14 @@ committed, so CI vendors the same bundle a checkout does. Entries are written
 sorted and with a fixed timestamp, so the same source produces the same bytes
 and two builds can be compared.
 
-What goes in is what Chrome loads, plus the README: the tests, their golden
-fixtures and the `package.json` that marks `src/` as ES modules for node all
-stay out. Paths inside are relative to `web/`, because Chrome wants
-`manifest.json` at the root of what it loads.
+What goes in is what Chrome loads, plus the README and two licences: the tests,
+their golden fixtures and the `package.json` that marks `src/` as ES modules for
+node all stay out. The repository's own `LICENSE` lands at the archive root;
+`web/vendor/plotly.LICENSE`, plotly's MIT text that `web-vendor` writes beside
+the bundle, packs in with the rest of `vendor/`. `plotly.min.js` names that
+licence but does not carry it, and the zip is a redistribution that must. Paths
+inside are relative to `web/`, because Chrome wants `manifest.json` at the root
+of what it loads.
 
 **A downloaded zip is not installable as it stands** — Chrome only takes an
 unpacked folder outside the Web Store, so the release notes say to unpack it

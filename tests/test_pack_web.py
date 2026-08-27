@@ -53,6 +53,7 @@ def tree(tmp_path):
     write(web / "README.md", "readme\n")
     write(web / "src" / "report.js", "// code\n")
     write(web / "vendor" / "plotly.min.js", "// plotly\n")
+    write(web / "vendor" / "plotly.LICENSE", "MIT License\n")
     # Developer scaffolding, which must stay out of the archive.
     (web / "tests").mkdir()
     write(web / "tests" / "parity.test.mjs", "// tests\n")
@@ -75,6 +76,20 @@ def test_the_licence_ships_inside_the_archive(tree):
     module = load()
     with packed(module, tree) as archive:
         assert archive.read("LICENSE").decode() == "BSD 3-Clause License\n"
+
+
+def test_plotly_s_licence_ships_beside_its_bundle(tree):
+    """`plotly.min.js` names the MIT licence but does not carry its text."""
+    module = load()
+    with packed(module, tree) as archive:
+        assert archive.read("vendor/plotly.LICENSE").decode() == "MIT License\n"
+
+
+def test_a_missing_plotly_licence_stops_the_release(tree):
+    module = load()
+    (tree / "web" / "vendor" / "plotly.LICENSE").unlink()
+    with pytest.raises(SystemExit, match="plotly.LICENSE is missing"):
+        packed(module, tree)
 
 
 def test_the_licence_lands_at_the_root_beside_the_manifest(tree):

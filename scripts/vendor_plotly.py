@@ -12,29 +12,49 @@ That pins them to each other on one machine. What pins them across machines is
 only some of the platforms would have this write a different five megabytes
 depending on where it ran.
 
+`plotly.min.js` carries only a one-line copyright and a bare "Licensed under the
+MIT license"; the MIT text itself is not in it. Clause of that licence asks that
+the notice travel with the code, and the release archive is a redistribution of
+it, so the full terms are written out beside the bundle -- from plotly's own
+packaged `LICENSE`, so the version cannot drift from the code it covers.
+
 Run `pixi run web-vendor` once after cloning, and again after changing the
 plotly pin.
 """
 
 from __future__ import annotations
 
+from importlib.metadata import distribution
 from pathlib import Path
 
 from plotly.offline import get_plotlyjs
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = ROOT / "web" / "vendor" / "plotly.min.js"
+VENDOR = ROOT / "web" / "vendor"
+BUNDLE = VENDOR / "plotly.min.js"
+LICENSE = VENDOR / "plotly.LICENSE"
+
+
+def _plotly_license() -> str:
+    """The MIT text plotly ships in its distribution metadata."""
+    dist = distribution("plotly")
+    for path in dist.files or []:
+        if path.name.upper().startswith("LICENSE"):
+            return path.read_text(encoding="utf-8")
+    raise SystemExit("plotly ships no LICENSE file to copy into the archive")
 
 
 def main() -> None:
-    TARGET.parent.mkdir(parents=True, exist_ok=True)
+    VENDOR.mkdir(parents=True, exist_ok=True)
     source = get_plotlyjs()
-    # `newline` rather than the platform default: this file is packed into the
-    # release archive, which is meant to come out byte for byte the same
+    # `newline` rather than the platform default: these files are packed into
+    # the release archive, which is meant to come out byte for byte the same
     # wherever it was built, and on Windows the default would rewrite every
     # line ending in five megabytes of JavaScript.
-    TARGET.write_text(source, encoding="utf-8", newline="\n")
-    print(f"wrote {TARGET.relative_to(ROOT)} ({len(source) / 1e6:.1f} MB)")
+    BUNDLE.write_text(source, encoding="utf-8", newline="\n")
+    LICENSE.write_text(_plotly_license(), encoding="utf-8", newline="\n")
+    print(f"wrote {BUNDLE.relative_to(ROOT)} ({len(source) / 1e6:.1f} MB)")
+    print(f"wrote {LICENSE.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
