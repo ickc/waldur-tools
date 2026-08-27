@@ -8,11 +8,11 @@ rem by waldur_tools.config instead, which does that on every platform. The
 rem workflow is therefore the same as on Unix: write the token into
 rem .envrc.local, and the next command picks it up.
 
-set "root=%PIXI_PROJECT_ROOT%"
-if not defined root set "root=%CD%"
-
-rem Defaults, overridable from the surrounding environment.
+rem Defaults, overridable from the surrounding environment. Written straight
+rem into the variable being defaulted rather than through a scratch name: this
+rem runs in the caller's environment, cmd variable names are case-insensitive,
+rem and a helper called `root` would quietly overwrite -- and then delete -- a
+rem `ROOT` the caller had set. Activation only adds these two.
 if not defined WALDUR_API_URL set "WALDUR_API_URL=https://portal-api.isambard.ac.uk"
-if not defined WALDUR_CACHE_DIR set "WALDUR_CACHE_DIR=%root%\data"
-
-set "root="
+if not defined WALDUR_CACHE_DIR if defined PIXI_PROJECT_ROOT set "WALDUR_CACHE_DIR=%PIXI_PROJECT_ROOT%\data"
+if not defined WALDUR_CACHE_DIR set "WALDUR_CACHE_DIR=%CD%\data"
