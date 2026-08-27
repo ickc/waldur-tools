@@ -10,8 +10,15 @@ on:
 # only on a pull request, where the last push is the only one anybody reads. A
 # run on `main` is the record of whether that commit was healthy on every
 # platform, and the next push does not make the previous commit's answer moot.
+#
+# Which is why `main` groups by commit rather than by branch. A group holds one
+# run at the front of the queue, so a second push while the first is still
+# running would evict the one waiting behind it -- not cancelled in progress,
+# simply never started, and that commit has no answer on any platform. A group
+# per commit cannot collide with itself; a pull request keeps the stable group
+# that makes the cancellation above possible.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
