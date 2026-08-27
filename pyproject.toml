@@ -82,8 +82,14 @@ scripts = ["scripts/activate.bat"]
 [tool.pixi.tasks]
 cli = "waldur-tools"
 test = "pytest"
+# Coverage is worth having in CI and not worth paying for on every local run,
+# so it is a task of its own rather than an option on `test`.
+test-cov = "pytest --cov=waldur_tools --cov-report=term-missing"
 lint = "ruff check src tests"
 fmt = "ruff format src tests"
+# The same formatting, reported rather than applied. CI has nothing to apply it
+# to, and a task means the check is spelled once instead of once per platform.
+fmt-check = "ruff format --check src tests"
 typecheck = "mypy src"
 
 # The browser extension. `web-vendor` writes the plotly bundle it loads, out of
@@ -92,13 +98,18 @@ typecheck = "mypy src"
 # arithmetic against this package's, and must run after `test`, which is what
 # regenerates the golden files it reads.
 web-vendor = { cmd = "python scripts/vendor_plotly.py" }
-test-web = { cmd = "node --test 'web/tests/*.test.mjs'", depends-on = ["test"] }
+# `node-test` is the node half on its own, because CI reaches it having already
+# run pytest -- with coverage -- and would otherwise run the suite twice.
+node-test = { cmd = "node --test 'web/tests/*.test.mjs'" }
+test-web = { depends-on = ["test", "node-test"] }
 # Writes the release asset into dist/. The plotly bundle is generated and not
 # committed, so packing depends on vendoring it -- an archive built without it
 # would be an extension that cannot draw.
 web-pack = { cmd = "python scripts/pack_web.py", depends-on = ["web-vendor"] }
 
-check = { depends-on = ["lint", "typecheck", "test", "test-web"] }
+# Everything CI runs, in the order CI runs it, so a green `check` locally means
+# a green CI on this platform.
+check = { depends-on = ["lint", "fmt-check", "typecheck", "test", "node-test"] }
 
 # --------------------------------------------------------------------------
 # tooling

@@ -7,7 +7,27 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # One runner per platform in `tool.pixi.workspace.platforms`: a platform
+    # that is solved for but never run on is a claim, not a fact.
+    #   ubuntu-latest    linux-64
+    #   ubuntu-24.04-arm linux-aarch64
+    #   macos-latest     osx-arm64
+    #   macos-13         osx-64
+    #   windows-latest   win-64
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform's result, not just the first one to fail -- the whole
+      # point here is knowing which of them are healthy.
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-13
+          - windows-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -16,21 +36,24 @@ jobs:
         with:
           cache: true
 
+      # Every step is a pixi task, so each one is a single word with nothing to
+      # quote -- the runners do not agree on a shell, and pixi's own shell is
+      # the same on all of them.
       - name: Lint
         run: pixi run lint
 
       - name: Format check
-        run: pixi run ruff format --check src tests
+        run: pixi run fmt-check
 
       - name: Type check
         run: pixi run typecheck
 
       - name: Test
-        run: pixi run pytest --cov=waldur_tools --cov-report=term-missing
+        run: pixi run test-cov
 
       # Runs after the suite above, which is what regenerates the golden files
       # the parity test reads -- and which fails first if they were left
-      # uncommitted. `pixi run test-web` would re-run pytest for that reason, so
-      # the runner is invoked directly here.
+      # uncommitted. `test-web` would re-run pytest for that reason, so the node
+      # half is invoked on its own here.
       - name: Web tests
-        run: pixi run node --test 'web/tests/*.test.mjs'
+        run: pixi run node-test
