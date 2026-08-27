@@ -310,7 +310,10 @@ project that ran them, summing to the <code>incurred_costs</code> the portal cha
 used rather than <code>openportal-allocation-user-usage</code> because the portal drops a
 project's usage rows when its allocation ends &mdash; every month of them, retrospectively
 &mdash; while the invoice does not move. A report summed out of the usage endpoint shrinks
-every time a project finishes, and shrinks for months already past; this one does not.</li>
+every time a project finishes, and shrinks for months already past; this one does not.
+The exception is a month the portal has not invoiced yet &mdash; in practice the hatched
+one &mdash; where there is no ledger to read and the usage roll-up stands in, so that
+column is a different measurement from the ones beside it as well as an incomplete one.</li>
 <li><strong>The user counts come from the usage endpoint.</strong>
 <code>openportal-allocation-user-usage</code> is the only endpoint with both a time axis and
 a person on each row, so <em>active users</em> is built from it &mdash; pulled a calendar
