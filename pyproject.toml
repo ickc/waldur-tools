@@ -50,7 +50,7 @@ packages = ["src/waldur_tools"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-aarch64", "linux-64", "osx-arm64"]
+platforms = ["linux-aarch64", "linux-64", "osx-arm64", "osx-64", "win-64"]
 
 [tool.pixi.dependencies]
 python = ">=3.11,<3.14"
