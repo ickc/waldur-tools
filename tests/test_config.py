@@ -14,6 +14,7 @@ from waldur_tools.config import (
     origin_of,
     resolve_token,
     restrict,
+    write_private,
 )
 
 # Every token file below is written by hand in the test, so it inherits the
@@ -227,3 +228,56 @@ def test_plain_http_to_this_machine_is_allowed(tmp_path):
 def test_something_that_is_not_a_url_is_refused_before_the_first_request(tmp_path):
     with pytest.raises(InsecureApiUrlError, match="http\\(s\\) URL"):
         Settings(api_url="portal.example.test", token="t", cache_dir=tmp_path)
+
+
+# -- writing a file nobody else may read ---------------------------------------
+
+
+@posix_only
+def test_a_private_write_is_owner_only_before_a_byte_reaches_it(tmp_path):
+    """`chmod` after the write leaves the whole write readable; this does not."""
+    seen = {}
+
+    def write(path):
+        seen["mode"] = stat.S_IMODE(path.stat().st_mode)
+        path.write_text("an organisation's spend")
+
+    target = write_private(tmp_path / "report.csv", write)
+    assert seen["mode"] == PRIVATE_FILE
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE
+    assert target.read_text() == "an organisation's spend"
+
+
+@posix_only
+def test_a_private_write_replaces_a_world_readable_file_rather_than_narrowing_it(tmp_path):
+    """An overwrite in place would stay 0644 for as long as the write took."""
+    target = tmp_path / "report.csv"
+    target.write_text("last week")
+    target.chmod(0o644)
+    midway = {}
+
+    def write(path):
+        # Nothing of the new report is at the destination yet, so the mode the
+        # old one carries cannot publish any of it.
+        midway["at the destination"] = target.read_text()
+        path.write_text("this week")
+
+    write_private(target, write)
+    assert midway["at the destination"] == "last week"
+    assert target.read_text() == "this week"
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE
+
+
+def test_a_private_write_that_fails_leaves_nothing_of_itself_behind(tmp_path):
+    """A half-written report must not replace a whole one, or linger beside it."""
+    target = tmp_path / "report.csv"
+    target.write_text("last week")
+
+    def boom(path):
+        path.write_text("half a rep")
+        raise RuntimeError("the portal went away")
+
+    with pytest.raises(RuntimeError, match="went away"):
+        write_private(target, boom)
+    assert target.read_text() == "last week"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["report.csv"]

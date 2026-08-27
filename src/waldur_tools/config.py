@@ -5,7 +5,9 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
+import tempfile
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -49,6 +51,40 @@ def restrict(path: Path, mode: int = PRIVATE_FILE) -> Path:
     with contextlib.suppress(OSError):
         path.chmod(mode)
     return path
+
+
+def write_private(target: Path, write: Callable[[Path], None]) -> Path:
+    """Write ``target`` through a file only its owner can read, and hand it back.
+
+    :func:`restrict` can only narrow a file that already exists, so on its own
+    it leaves the file at whatever ``umask`` gave it -- commonly 0644 -- for the
+    whole of the write, and an overwrite of a path that was already readable
+    stays readable throughout. On a shared login node that is a window in which
+    anyone with an account can read an organisation's spend, and the window is
+    as long as the write. These files are large.
+
+    So the bytes go to a temporary file in the same directory, which
+    ``mkstemp`` creates 0600 before there is anything in it to read, and
+    ``os.replace`` moves it over the target. The mode is right from the first
+    byte; the destination is never half-written; and a destination that already
+    existed permissive is replaced rather than corrected afterwards. The same
+    directory, because ``os.replace`` is only atomic within one filesystem --
+    and because it is the directory the caller asked for.
+
+    ``write`` is handed the temporary path and must not infer anything from its
+    name: the format is the caller's decision, taken from ``target``.
+    """
+    handle, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".part")
+    os.close(handle)
+    staged = Path(name)
+    try:
+        write(staged)
+        restrict(staged)
+        os.replace(staged, target)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return target
 
 
 def _warn_if_readable(path: Path, what: str) -> None:
