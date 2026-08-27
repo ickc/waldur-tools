@@ -107,8 +107,10 @@ test-web = { depends-on = ["test", "node-test"] }
 # would be an extension that cannot draw.
 web-pack = { cmd = "python scripts/pack_web.py", depends-on = ["web-vendor"] }
 
-# Everything CI runs, in the order CI runs it, so a green `check` locally means
-# a green CI on this platform.
+# Every check CI runs, in the order CI runs it, so a green `check` locally
+# means a green CI on this platform. Coverage is the one deliberate difference:
+# CI's test step is `test-cov`, which runs this same suite and additionally
+# reports on it, and nothing passes or fails on the report.
 check = { depends-on = ["lint", "fmt-check", "typecheck", "test", "node-test"] }
 
 # --------------------------------------------------------------------------
