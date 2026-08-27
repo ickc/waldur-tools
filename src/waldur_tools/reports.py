@@ -693,8 +693,10 @@ def monthly_totals(
 
     **Only ``active_projects`` counts what the ledger knows.** A project billed
     for node hours ran them, whether or not its usage rows still exist, so that
-    count is taken from the invoice. ``active_users`` cannot be: the invoice has
-    no user axis at all. It is therefore a **lower bound** wherever
+    count is taken from the invoice -- and, in a month with no invoice to read,
+    from the same usage rows ``node_hours`` falls back to, so that the two
+    always describe the same measurement. ``active_users`` cannot be: the
+    invoice has no user axis at all. It is therefore a **lower bound** wherever
     ``projects_without_usage`` is above zero -- those projects contributed
     people that nothing left in the API can count. Both still count only
     non-zero usage, so they read as "who actually ran something" rather than
@@ -714,6 +716,7 @@ def monthly_totals(
         usage_node_hours=pl.col("node_usage").sum(),
         active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),
         projects_with_usage_rows=pl.col("project_code").n_unique(),
+        usage_active_projects=pl.col("project_code").filter(pl.col("node_usage") > 0).n_unique(),
     )
     ledger = billed.group_by("month").agg(
         node_hours=pl.col("node_hours").sum(),
@@ -725,7 +728,12 @@ def monthly_totals(
     return (
         _ledger_or_usage(ledger, used, months, on=["month"])
         .with_columns(
-            active_projects=pl.col("active_projects").fill_null(0),
+            # `active_projects` follows `node_hours`: counting the ledger's
+            # projects beside a usage-sourced total would report no projects at
+            # all for a month that plainly ran something.
+            active_projects=pl.when(pl.col("node_hours_source") == "invoice")
+            .then(pl.col("active_projects").fill_null(0))
+            .otherwise(pl.col("usage_active_projects").fill_null(0)),
             projects_without_usage=pl.col("projects_without_usage").fill_null(0),
             projects_with_usage_rows=pl.col("projects_with_usage_rows").fill_null(0),
             entitlement_node_hours=_entitlement(nodes, share),

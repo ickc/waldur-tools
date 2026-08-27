@@ -340,9 +340,10 @@ function ledgerMonths(invoices, customer) {
  *
  * **Only `active_projects` counts what the ledger knows.** A project billed for
  * node hours ran them, whether or not its usage rows still exist, so that count
- * comes off the invoice. `active_users` cannot: the invoice has no user axis at
- * all, so it is a **lower bound** wherever `projects_without_usage` is above
- * zero. Both count only non-zero usage, so they read as "who actually ran
+ * comes off the invoice -- and, in a month with no invoice to read, off the same
+ * usage rows `node_hours` falls back to, so the two always describe the same
+ * measurement. `active_users` cannot: the invoice has no user axis at all, so it
+ * is a **lower bound** wherever `projects_without_usage` is above zero. Both count only non-zero usage, so they read as "who actually ran
  * something" rather than "who could have". `is_partial` marks the month `asOf`
  * falls in, which is incomplete by construction and must be kept out of any
  * average.
@@ -368,6 +369,7 @@ export function monthlyTotals(rows, invoices, {
       usage_node_hours: sumOf(bucket, 'node_usage'),
       active_users: distinct(bucket, 'unix_username', (row) => row.node_usage > 0),
       projects_with_usage_rows: distinct(bucket, 'project_code'),
+      active_projects: distinct(bucket, 'project_code', (row) => row.node_usage > 0),
     });
   }
 
@@ -383,7 +385,9 @@ export function monthlyTotals(rows, invoices, {
       node_hours: nodeHours,
       usage_node_hours: right?.usage_node_hours ?? null,
       node_hours_source: fromLedger ? 'invoice' : 'usage',
-      active_projects: left?.active_projects ?? 0,
+      // Follows `node_hours`: the ledger's count beside a usage-sourced total
+      // would report no projects at all for a month that plainly ran something.
+      active_projects: (fromLedger ? left?.active_projects : right?.active_projects) ?? 0,
       active_users: right?.active_users ?? null,
       projects_with_usage_rows: right?.projects_with_usage_rows ?? 0,
       projects_without_usage: left?.projects_without_usage ?? 0,

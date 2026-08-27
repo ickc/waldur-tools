@@ -276,6 +276,9 @@ def test_monthly_falls_back_to_usage_in_a_month_with_no_invoice(tmp_path, alloca
     row = reports.monthly_totals(snap, customer="UKRI").row(0, named=True)
     assert row["node_hours"] == pytest.approx(500.0)
     assert row["node_hours_source"] == "usage"
+    # The ledger knows of no project that month; the usage rows do, and they are
+    # what the total came from, so the count has to come from the same side.
+    assert row["active_projects"] == 1
 
 
 def test_monthly_totals_still_report_without_an_invoices_endpoint(tmp_path, allocations):
@@ -298,6 +301,7 @@ def test_monthly_totals_still_report_without_an_invoices_endpoint(tmp_path, allo
     row = reports.monthly_totals(snap, customer="UKRI").row(0, named=True)
     assert row["node_hours"] == pytest.approx(12.0)
     assert row["node_hours_source"] == "usage"
+    assert row["active_projects"] == 1
 
 
 def test_monthly_marks_only_the_snapshot_month_as_partial(snapshot, monkeypatch):
