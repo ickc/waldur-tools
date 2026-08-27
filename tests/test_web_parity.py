@@ -202,7 +202,10 @@ def _golden(name: str, payload: object) -> None:
     if target.exists() and target.read_text(encoding="utf-8") == text:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    # `newline` rather than the platform default: these files are committed and
+    # read by the node side, so a rewrite on Windows must leave the same bytes a
+    # rewrite anywhere else would.
+    target.write_text(text, encoding="utf-8", newline="\n")
     pytest.fail(
         f"web/tests/{name} was out of date and has been rewritten. Review the diff, "
         "make web/src/reports.js agree with it, and commit both."
