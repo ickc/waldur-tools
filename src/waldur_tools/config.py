@@ -53,7 +53,7 @@ def restrict(path: Path, mode: int = PRIVATE_FILE) -> Path:
     return path
 
 
-def write_private(target: Path, write: Callable[[Path], None]) -> Path:
+def write_private(target: Path, write: Callable[[Path], object]) -> Path:
     """Write ``target`` through a file only its owner can read, and hand it back.
 
     :func:`restrict` can only narrow a file that already exists, so on its own
@@ -72,7 +72,10 @@ def write_private(target: Path, write: Callable[[Path], None]) -> Path:
     and because it is the directory the caller asked for.
 
     ``write`` is handed the temporary path and must not infer anything from its
-    name: the format is the caller's decision, taken from ``target``.
+    name: the format is the caller's decision, taken from ``target``. Whatever
+    it returns is discarded -- the annotation is ``object`` so that a writer
+    which happens to return something, like ``Path.write_text`` returning the
+    count it wrote, needs no wrapper to be passed here.
     """
     handle, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".part")
     os.close(handle)
