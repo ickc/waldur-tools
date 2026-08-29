@@ -1266,13 +1266,15 @@ cannot come apart. A tag can be pushed at a commit that never went through CI,
 so the workflow runs `pixi run check` in full before it packs anything.
 
 `pixi run web-pack` is the same command the workflow runs, so the archive can
-be built and inspected locally before tagging. It depends on `web-vendor`,
-which is the whole reason it is a task rather than shell in the YAML: the
-plotly bundle is generated and not committed, and an archive built without it
-would be an extension that loads and then cannot draw. `pixi.lock` is
-committed, so CI vendors the same bundle a checkout does. Entries are written
-sorted and with a fixed timestamp, so the same source produces the same bytes
-and two builds can be compared.
+be built and inspected locally before tagging, and CI runs that same task on
+every platform — packing is the one part of a release that used to be reached
+only by pushing a tag, so a packer broken anywhere is now a failed check rather
+than a failed release. It depends on `web-vendor`, which is the whole reason it
+is a task rather than shell in the YAML: the plotly bundle is generated and not
+committed, and an archive built without it would be an extension that loads and
+then cannot draw. `pixi.lock` is committed, so CI vendors the same bundle a
+checkout does. Entries are written sorted and with a fixed timestamp, so the
+same source produces the same bytes and two builds can be compared.
 
 What goes in is what Chrome loads, plus the README and two licences: the tests,
 their golden fixtures and the `package.json` that marks `src/` as ES modules for

@@ -76,3 +76,14 @@ jobs:
       # half is invoked on its own here.
       - name: Web tests
         run: pixi run node-test
+
+      # The release workflow is the only other thing that packs, so until this
+      # step existed a packer broken on any platform was discovered by pushing
+      # a tag -- the one action here that cannot be taken back. Packing is also
+      # where the byte-for-byte claims are actually exercised: `web-pack`
+      # depends on `web-vendor`, and both write files whose contents are meant
+      # not to depend on the machine that wrote them, which is a claim only a
+      # run on all five platforms can put any weight behind. The archive is
+      # thrown away -- what is under test is that it can be built at all.
+      - name: Pack
+        run: pixi run web-pack
