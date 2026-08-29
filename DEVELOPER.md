@@ -1246,6 +1246,19 @@ git tag v0.3.0
 git push origin v0.3.0
 ```
 
+The bump is a commit of its own and the tag names it, but nothing holds the two
+together, and 0.4.0 was bumped eighteen commits before it shipped. That is not
+wrong — everything merged between the bump and the tag goes out under that
+number, which is usually what was wanted — but it does mean the version written
+on `main` answers two different questions depending on when it is asked. Until
+the tag exists it names the release that has not happened yet; once the tag is
+pushed it names the one that has. Comparing the three files against
+`git tag --list "v*" --sort=-v:refname | head -1` is the whole check: level
+with it, and the next release starts by bumping all three afresh; ahead of it,
+and the number is already staged and only wants tagging. Nothing enforces the
+reading — the workflow checks that the three agree with the tag, which they do
+either way.
+
 The tag is unprefixed because there is one version line, not two. This
 repository has two shippable things — the package and the extension — and they
 are deliberately kept at the same number: `web/manifest.json`, the `version` in
