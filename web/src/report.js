@@ -30,7 +30,7 @@
 
 import { MonthCache } from './store.js';
 import {
-  DEFAULT_PAGE_SIZE, WaldurClient, WaldurError, pullByMonth,
+  DEFAULT_PAGE_SIZE, WaldurClient, WaldurError, originOf, pullByMonth,
 } from './api.js';
 import {
   figureEngagement, figureHeatmap, figureProjects, figureQueue, figureShare,
@@ -153,12 +153,15 @@ function render() {
     return;
   }
 
-  const totals = reports.monthlyTotals(rows, { nodes, share, asOf: state.asOf });
-  const perProject = reports.monthly(rows, { nodes, share });
+  const totals = reports.monthlyTotals(rows, invoices, {
+    nodes, share, scope, customer, asOf: state.asOf,
+  });
+  const perProject = reports.monthly(rows, invoices, { nodes, share, scope, customer });
   const months = totals.map((row) => row.month);
   const complete = totals.filter((row) => !row.is_partial);
   const latest = complete.length ? complete[complete.length - 1] : null;
-  const codes = [...new Set(perProject.map((row) => row.project_code))];
+  // A project billed after its allocation ended has no code left to look up.
+  const codes = [...new Set(perProject.map((row) => row.project_code))].filter(Boolean);
 
   const allocation = reports.allocationsReport(scope, summary, { asOf: state.asOf, customer });
   const awarded = reports.committed(allocation, months, state.asOf);
@@ -278,7 +281,7 @@ function render() {
   el('tiles').innerHTML = tiles.join('');
 
   // -- reconcile ------------------------------------------------------------
-  renderReconcile(rows, invoices, customer);
+  renderReconcile(rows, invoices, customer, scope);
 
   // -- figures --------------------------------------------------------------
   ensureSection('share', 'Are we using our share?');
@@ -293,11 +296,12 @@ function render() {
   draw('share', figureShare(totals, nodes, share, awarded));
   table('share', totals, [
     ['month', 'Month', 'month'],
-    ['node_hours', 'Node hours used', 'number'],
+    ['node_hours', 'Node hours billed', 'number'],
+    ['usage_node_hours', 'Node hours still in the usage table', 'number'],
     ['entitlement_node_hours', 'Share worth', 'number'],
     ['pct_of_entitlement', '% of share', 'number'],
     ['active_projects', 'Active projects'],
-    ['active_users', 'Active users'],
+    ['active_users', 'Active users (at least)'],
   ]);
 
   draw('projects', figureProjects(reports.rankedBands(perProject), totals));
@@ -393,7 +397,7 @@ function note(id, html) {
  * the only independent measurement of these node hours, and the failure it
  * catches -- an unstable pull -- looks exactly like a finding until you check.
  */
-function renderReconcile(rows, invoices, customer) {
+function renderReconcile(rows, invoices, customer, scope) {
   const badge = el('reconcile-badge');
   const detail = el('reconcile');
   if (!invoices.length) {
@@ -401,8 +405,9 @@ function renderReconcile(rows, invoices, customer) {
     detail.innerHTML = '';
     return;
   }
-  const checked = reports.reconcile(rows, invoices, { customer, asOf: state.asOf });
-  const bad = checked.filter((row) => row.status !== 'ok' && row.status !== 'no invoice');
+  const checked = reports.reconcile(rows, invoices, { customer, scope, asOf: state.asOf });
+  const bad = checked.filter((row) => !reports.RECONCILED.has(row.status));
+  const ended = checked.filter((row) => row.status === 'project ended');
   // The table goes up either way. When it reconciles it is the evidence for the
   // badge; when it does not, it is the only thing that says which months and by
   // how much -- and telling a known accounting quirk from an unstable pull is
@@ -412,8 +417,17 @@ function renderReconcile(rows, invoices, customer) {
     ? `<span class="badge warn" title="${esc(
       bad.map((row) => `${reports.monthLabel(row.month)}: ${row.status}`).join(', '),
     )}">${bad.length} month${bad.length === 1 ? '' : 's'} do not reconcile — see below</span>`
-    : `<span class="badge ok" title="Usage agrees with incurred_costs in every invoiced ` +
-      `month">usage reconciles with ${checked.length} months of invoices</span>`;
+    : ended.length
+      ? `<span class="badge ok" title="${esc(
+        `Usage agrees with incurred_costs everywhere it can. ${ended.length} month${
+          ended.length === 1 ? '' : 's'
+        } are short only because a project has since ended and the portal drops a ` +
+        'terminated project\u2019s usage rows; the node hours on this page come from the ' +
+        'invoice and are unaffected.',
+      )}">usage reconciles with ${checked.length} months of invoices — ${ended.length} ` +
+        `explained by ended projects</span>`
+      : `<span class="badge ok" title="Usage agrees with incurred_costs in every invoiced ` +
+        `month">usage reconciles with ${checked.length} months of invoices</span>`;
 }
 
 /**
@@ -692,26 +706,41 @@ function parseShare(text) {
  * which is held in memory and dropped when the browser closes. Never
  * `localStorage`: a token that outlives the browser is a token still sitting on
  * disk long after the portal expired it hours later.
+ *
+ * **The origin is remembered with it, and checked on the way back out.** A
+ * token is a bearer credential for one deployment; the API URL box defaults to
+ * this one's, so a token remembered while reading a second Waldur would
+ * otherwise be picked up on the next visit and sent to the default. That is one
+ * deployment's credential handed to another, from nothing but a page reload.
+ * Storing the pair makes the two inseparable, and a stored token whose origin
+ * does not match the one about to be read is dropped rather than reused.
  */
 const session = {
-  async get() {
+  async get(apiUrl) {
     try {
-      const stored = await chrome.storage.session.get('token');
-      return stored.token ?? null;
+      const stored = await chrome.storage.session.get(['token', 'origin']);
+      if (!stored.token) return null;
+      const wanted = originOf(apiUrl);
+      // No origin stored is a token remembered by an older version, which was
+      // remembered without one. It cannot be shown to belong here, so it is not
+      // used here -- a re-paste, against the credential going somewhere it was
+      // never issued for.
+      if (!stored.origin || wanted === null || stored.origin !== wanted) return null;
+      return stored.token;
     } catch {
       return null;
     }
   },
-  async set(token) {
+  async set(token, apiUrl) {
     try {
-      await chrome.storage.session.set({ token });
+      await chrome.storage.session.set({ token, origin: originOf(apiUrl) });
     } catch {
       // Not being able to remember it is a re-paste, not a failure.
     }
   },
   async clear() {
     try {
-      await chrome.storage.session.remove('token');
+      await chrome.storage.session.remove(['token', 'origin']);
     } catch {
       // As above.
     }
@@ -856,7 +885,7 @@ async function start() {
     );
   }
 
-  if (el('remember').checked) await session.set(token);
+  if (el('remember').checked) await session.set(token, apiUrl);
   else await session.clear();
 
   await build({ token, apiUrl, fromPortal: false });
@@ -1033,7 +1062,9 @@ async function boot() {
     return;
   }
 
-  const stored = await session.get();
+  // Keyed on the URL about to be read, so a token remembered against another
+  // deployment is simply not found rather than quietly reused against this one.
+  const stored = apiUrl ? await session.get(apiUrl) : null;
   if (stored) {
     el('token').value = stored;
     el('remember').checked = true;

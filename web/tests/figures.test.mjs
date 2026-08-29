@@ -38,8 +38,10 @@ const rows = reports.monthlyRows(
   scope,
   customer,
 );
-const totals = reports.monthlyTotals(rows, { nodes, share, asOf });
-const perProject = reports.monthly(rows, { nodes, share });
+const totals = reports.monthlyTotals(rows, fixture.invoices, {
+  nodes, share, scope, customer, asOf,
+});
+const perProject = reports.monthly(rows, fixture.invoices, { nodes, share, scope, customer });
 const months = totals.map((row) => row.month);
 const allocation = reports.allocationsReport(
   scope,
@@ -453,14 +455,33 @@ describe('the invoice cross-check table', () => {
       is_partial: false },
     { month: '2026-03', node_hours: 400, incurred_costs: null, difference: null,
       pct_difference: null, status: 'no invoice', invoice_state: null, is_partial: true },
+    // Short on the usage side by exactly what a project that has since ended
+    // was billed. Not a defect, and the table has to say so rather than
+    // colouring it the same red as the row above.
+    { month: '2025-12', node_hours: 600, incurred_costs: 1000, difference: -400,
+      pct_difference: -40, missing_projects: 1, missing_node_hours: 400,
+      status: 'project ended', invoice_state: 'created', is_partial: false },
   ];
 
   it('lists every month, not only the ones that disagree', () => {
     // A gap with no agreeing months beside it has no scale to be read against.
     const html = reconcileTable(rows);
-    for (const label of ['Jan 2026', 'Feb 2026', 'Mar 2026']) {
+    for (const label of ['Jan 2026', 'Feb 2026', 'Mar 2026', 'Dec 2025']) {
       assert.ok(html.includes(label), `${label} is missing from the table`);
     }
+  });
+
+  it('does not flag a month the ledger already explains', () => {
+    // A terminated project's usage rows are dropped for every month it ever
+    // ran while its invoices stand, so the shortfall is expected and the node
+    // hours on the page -- which come off the invoice -- are unaffected.
+    // Colouring it as a failure would send someone to re-pull a good snapshot.
+    const html = reconcileTable(rows);
+    assert.ok(html.includes('project ended'));
+    // One flagged row, not two: only the genuine `usage high`.
+    assert.equal(html.match(/class="flagged"/g).length, 1);
+    // And it says so in words above the table.
+    assert.match(html, /1 month<\/strong> below are short on the usage side/);
   });
 
   it('opens itself when something disagrees, and stays shut when nothing does', () => {
@@ -479,7 +500,7 @@ describe('the invoice cross-check table', () => {
 
   it('shows both routes and the gap, signed, rather than a verdict', () => {
     const html = reconcileTable(rows);
-    assert.ok(html.includes('Node hours used') && html.includes('Invoiced'));
+    assert.ok(html.includes('Node hours in the usage table') && html.includes('Invoiced'));
     // Positive means usage nobody billed -- the shape a duplicated page takes.
     assert.match(html, /\+33\.3%/);
   });

@@ -7,6 +7,13 @@
  * extension with `host_permissions` for the API is not subject to that. See
  * web/README.md for the measurement and for the route back to a plain web page.
  *
+ * **The token goes to exactly one origin.** It is a bearer credential for one
+ * deployment, and two things could send it to another: a `Link: rel=next`
+ * naming a different host, which this walk follows as an absolute URL, and a
+ * remembered token being paired with the wrong API URL. Both are guarded --
+ * here by `sameOrigin`, and in `report.js` by remembering the origin alongside
+ * the token and refusing to reuse one against a different deployment.
+ *
  * **The paging guards are not optional.** `page`/`page_size` is `LIMIT`/`OFFSET`
  * underneath, and that only enumerates a queryset once if the ordering is
  * total. `openportal-allocation-user-usage` is ordered by `(year, month)` and
@@ -73,6 +80,22 @@ export function parseLinkHeader(header) {
   return links;
 }
 
+/**
+ * `scheme://host[:port]`, or null when the string is not a URL at all.
+ *
+ * What decides whether the `Authorization` header may be attached is who is
+ * going to receive it, which is the scheme, the host and the port -- never the
+ * path or the query. `URL.origin` is exactly that, and this only exists to turn
+ * a parse failure into a null instead of a throw.
+ */
+export function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 export class WaldurClient {
   /**
    * @param {object} options
@@ -89,6 +112,10 @@ export class WaldurClient {
    */
   constructor({ apiUrl, token, renew = null }) {
     this.apiUrl = apiUrl.replace(/\/+$/, '');
+    this.origin = originOf(this.apiUrl);
+    if (this.origin === null) {
+      throw new WaldurError(`${apiUrl} is not a URL this can send a token to.`);
+    }
     this.token = token;
     this.renew = renew;
   }
@@ -98,7 +125,31 @@ export class WaldurClient {
     return `${this.apiUrl}/api/${endpoint.replace(/^\/|\/$/g, '')}/`;
   }
 
+  /**
+   * One GET, with the token, held to the origin this client was built for.
+   *
+   * **Every URL is checked, not only the ones `url()` built.** A paginated walk
+   * follows an absolute URL out of the portal's `Link` header, and that is a URL
+   * the *server* chose: nothing in the protocol stops it naming another host,
+   * and `list` would attach the `Authorization` header to it. So the origin is
+   * checked here, where the header is added, rather than at each caller -- one
+   * place, and no way past it.
+   *
+   * A cross-origin `fetch` from an extension page would also need
+   * `host_permissions` for that host, so most of these would fail anyway. Most
+   * is not all: `optional_host_permissions` covers every https host, so that
+   * the extension can be pointed at another Waldur, and a reader who has
+   * granted it for their own deployment has granted it broadly. The permission
+   * model is therefore not the guard; this is.
+   */
   async get(url, params, { renewed = false } = {}) {
+    if (originOf(url) !== this.origin) {
+      throw new WaldurError(
+        `Refusing to send the portal token to ${originOf(url) ?? url}: this report is ` +
+          `reading ${this.origin}, and the token belongs to that deployment alone. ` +
+          'The URL was named by the server, in a Link header, rather than configured here.',
+      );
+    }
     const target = new URL(url);
     for (const [key, value] of Object.entries(params ?? {})) {
       target.searchParams.set(key, String(value));

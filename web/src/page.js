@@ -8,7 +8,7 @@
  */
 
 import { format } from './figures.js';
-import { humaniseBytes, monthLabel, monthLabelLong } from './reports.js';
+import { RECONCILED, humaniseBytes, monthLabel, monthLabelLong } from './reports.js';
 
 export function esc(value) {
   return String(value ?? '')
@@ -115,13 +115,14 @@ export function tableView(rows, columns) {
  */
 export function reconcileTable(rows) {
   if (!rows.length) return '';
-  const bad = rows.filter((row) => row.status !== 'ok' && row.status !== 'no invoice');
+  const bad = rows.filter((row) => !RECONCILED.has(row.status));
+  const ended = rows.filter((row) => row.status === 'project ended');
   const cell = (value, digits = 1) =>
     value === null || value === undefined ? '<td class="na">—</td>' : `<td>${format(value, digits)}</td>`;
 
   const body = rows
     .map((row) => {
-      const flagged = row.status !== 'ok' && row.status !== 'no invoice';
+      const flagged = !RECONCILED.has(row.status);
       const sign = row.pct_difference !== null && row.pct_difference > 0 ? '+' : '';
       return (
         `<tr class="${flagged ? 'flagged' : ''}">` +
@@ -132,6 +133,7 @@ export function reconcileTable(rows) {
         (row.pct_difference === null
           ? '<td class="na">—</td>'
           : `<td>${sign}${format(row.pct_difference, 1)}%</td>`) +
+        cell(row.missing_node_hours) +
         `<td>${esc(row.invoice_state ?? '—')}</td>` +
         `<td class="${flagged ? 'bad' : 'good'}">${esc(row.status)}</td>` +
         '</tr>'
@@ -144,15 +146,25 @@ export function reconcileTable(rows) {
     `<summary>Invoice cross-check, month by month${
       bad.length ? ` — ${bad.length} month${bad.length === 1 ? '' : 's'} disagree` : ''
     }</summary>` +
-    '<p class="sub">Node hours summed from <code>openportal-allocation-user-usage</code> ' +
-    'beside <code>incurred_costs</code> on the invoice for the same month — two routes to ' +
-    'the same figure, aggregated by different sides of the portal. A positive difference ' +
-    'is usage nobody billed, which is the shape a duplicated page takes; a negative one ' +
-    'is billing with no usage behind it, which is not something paging can cause. ' +
+    '<p class="sub">The figures on this page are the invoice’s. This table puts the other ' +
+    'route beside them: node hours summed from ' +
+    '<code>openportal-allocation-user-usage</code>, aggregated by a different side of the ' +
+    'portal. A positive difference is usage nobody billed, which is the shape a duplicated ' +
+    'page takes. A negative one is billing with no usage behind it — and the usual cause is ' +
+    'not a bad pull but a project that has ended, because the portal drops a terminated ' +
+    'project’s usage rows for every month it ever ran while its invoices stand. The ' +
+    '<em>Ended projects</em> column is what those projects were billed; where it covers the ' +
+    'difference the month reads <em>project ended</em> and nothing is wrong. ' +
     'The month in progress is expected to disagree and is marked partial.</p>' +
+    (ended.length
+      ? `<p class="sub"><strong>${ended.length} month${ended.length === 1 ? '' : 's'}</strong> ` +
+        'below are short on the usage side only because a project has since ended. Their ' +
+        'node hours on this page are still the invoice’s and are complete; what is ' +
+        'incomplete is the <em>active users</em> count, which has no ledger to come from.</p>'
+      : '') +
     '<div class="tablewrap"><table><thead><tr>' +
-    '<th>Month</th><th>Node hours used</th><th>Invoiced</th><th>Difference</th>' +
-    '<th>%</th><th>Invoice state</th><th>Status</th>' +
+    '<th>Month</th><th>Node hours in the usage table</th><th>Invoiced</th><th>Difference</th>' +
+    '<th>%</th><th>Ended projects</th><th>Invoice state</th><th>Status</th>' +
     `</tr></thead><tbody>${body}</tbody></table></div></details>`
   );
 }
@@ -264,8 +276,9 @@ export function intro({ nodes, share, customer, span, bestMonth, creditHeld, una
 <p>Isambard&nbsp;3 has ${nodes} compute nodes and our share of it is
 ${sharePct} &mdash; <strong>${format(held, 1)} nodes, held for every hour of every
 month</strong>. That is ${format(held * 24, 0)} node hours a day, and roughly
-${format(held * 24 * 30, 0)} a month. Every percentage on this page is usage measured
-against that, so 100% would mean we ran, on average, exactly the nodes we hold.</p>
+${format(held * 24 * 30, 0)} a month. Every percentage on this page measures the node
+hours the portal billed us against that, so 100% would mean we ran, on average, exactly
+the nodes we hold.</p>
 
 <p>Nothing on the machine cuts us off. ${best}
 Nor is the constraint a shortage of credit: we hold ${format(creditHeld, 0)} node hours of it
@@ -291,20 +304,32 @@ export function method({ nodes, share, customer, creditHeld, unallocated, unallo
 <section class="method" id="method">
 <h2>How to read these numbers</h2>
 <ul>
-<li><strong>The source is one endpoint.</strong> Every figure comes from
-<code>openportal-allocation-user-usage</code>, the only endpoint with a time axis: one row
-per user, allocation and calendar month. Nothing is smoothed, imputed or back-filled, and a
-month with no rows is a month with no usage. It is pulled a calendar month at a time and
-each month checked against the server's own row count, because paging it end to end returns
-some rows twice and drops others.</li>
+<li><strong>Node hours come from the invoices.</strong> Each month's total is that
+month's invoice read line by line: the billed usage lines, already attributed to the
+project that ran them, summing to the <code>incurred_costs</code> the portal charged. It is
+used rather than <code>openportal-allocation-user-usage</code> because the portal drops a
+project's usage rows when its allocation ends &mdash; every month of them, retrospectively
+&mdash; while the invoice does not move. A report summed out of the usage endpoint shrinks
+every time a project finishes, and shrinks for months already past; this one does not.
+The exception is a month the portal has not invoiced yet &mdash; in practice the hatched
+one &mdash; where there is no ledger to read and the usage roll-up stands in, so that
+column is a different measurement from the ones beside it as well as an incomplete one.</li>
+<li><strong>The user counts come from the usage endpoint.</strong>
+<code>openportal-allocation-user-usage</code> is the only endpoint with both a time axis and
+a person on each row, so <em>active users</em> is built from it &mdash; pulled a calendar
+month at a time and each month checked against the server's own row count, because paging it
+end to end returns some rows twice and drops others. For a project whose allocation has
+ended it holds no rows at all, so that project still contributes node hours but no longer
+any people, and those counts read as a lower bound.</li>
 <li><strong>This page reads the portal live.</strong> The command-line report builds from a
 timestamped snapshot you can keep and diff; this one holds nothing but the months it has
 already fetched, and the figures reflect the portal as of the moment you loaded it.</li>
-<li><strong>Node hours are assumed.</strong> The portal calls the field
-<code>node_usage</code> and does not state a unit. This reads it as node hours, which is
-what makes ${format(held, 1)} nodes &times; 24 h &times; days the right comparison. If it
-turns out to be node <em>days</em>, every percentage here is far too small &mdash; but the
-shape of every curve is unchanged.</li>
+<li><strong>The unit is the invoice's.</strong> The billed usage lines state their
+measured unit as hours and price it at one credit each, so a node hour is what the portal
+itself is counting, not an assumption this report makes. That is what makes
+${format(held, 1)} nodes &times; 24 h &times; days the right comparison. The usage
+endpoint's own <code>node_usage</code> field, shown beside each figure as the cross-check,
+states no unit and is read the same way.</li>
 <li><strong>Scope is ${esc(customer ?? 'every project this token administers')}.</strong>
 The portal also shows separately funded UKRI and other organisations' projects that share
 the same token; counting those in would inflate our own share.</li>
@@ -335,10 +360,11 @@ that doubled its award half way through shows its early months at half their tru
 <li><strong>Job shape is missing here, and only here.</strong> The command-line report gains
 three figures on job size and queue wait from <code>sacct</code> records captured on a login
 node. The portal has no per-job view, so a browser cannot answer those questions at all.</li>
-<li><strong>The usage is checked against the invoices.</strong> The badge at the top compares
-what these figures sum to against <code>incurred_costs</code> &mdash; the same node hours by
-a completely different route, since this deployment bills one credit per node hour. If it
-does not say <em>ok</em>, suspect the pull before believing the headline.</li>
+<li><strong>The figures are checked against the usage endpoint.</strong> The badge at the
+top sums <code>openportal-allocation-user-usage</code> and compares it to the invoiced total
+&mdash; the same node hours by a completely different route. They agree to a fraction of a
+percent except where a project has ended, which the badge names separately; anything else
+outside that, suspect the pull.</li>
 </ul>
 </section>
 `;

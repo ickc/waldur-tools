@@ -40,6 +40,7 @@ from pathlib import Path
 import polars as pl
 
 from .client import WaldurClient
+from .config import PRIVATE_DIR, restrict
 from .frames import to_frame
 
 #: Endpoints pulled by ``waldur-tools snapshot`` when none are named.
@@ -108,6 +109,10 @@ class Snapshot:
         name = name or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path = root / name
         path.mkdir(parents=True, exist_ok=True)
+        # A snapshot is one organisation's spend, project names and people, and
+        # the cache root defaults under the user's home on a shared login node.
+        # The directory is the boundary; `restrict` on each file is the belt.
+        restrict(path, PRIVATE_DIR)
         return cls(path)
 
     @classmethod
@@ -137,7 +142,7 @@ class Snapshot:
     def write(self, endpoint: str, frame: pl.DataFrame) -> Path:
         target = self.path / _filename(endpoint)
         frame.write_parquet(target)
-        return target
+        return restrict(target)
 
     def read(self, endpoint: str) -> pl.DataFrame:
         target = self.path / _filename(endpoint)
@@ -161,9 +166,9 @@ class Snapshot:
             "created": datetime.now(UTC).isoformat(),
             "endpoints": endpoints,
         }
-        (self.path / META_FILENAME).write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        target = self.path / META_FILENAME
+        target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        restrict(target)
 
 
 def available(root: Path) -> list[Snapshot]:

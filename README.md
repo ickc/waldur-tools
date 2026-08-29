@@ -12,7 +12,10 @@ what a colleague needs before touching anything.
 ### Three ways to consume it, one picture
 
 Everything here is **read-only** against the portal — no command in this repo
-writes anything back to Waldur.
+writes anything back to Waldur. That is a property of this code, not of the
+token: a Waldur personal access token carries the scopes and roles of the
+account that issued it, so what *it* can do is whatever you can do. Treat it
+accordingly.
 
 | | How you run it | Token | Who it is for |
 | --- | --- | --- | --- |
@@ -61,8 +64,10 @@ proposal is to keep the extension and retire the Python side, not the reverse.
   repeating it.
 - **The one thing that is not low stakes is secrets.** Hence the hard rule that
   nothing snapshot-derived — figures, project codes, usernames — goes into git
-  (see [CLAUDE.md](CLAUDE.md)), and no token is ever committed. Even that is
-  bounded: portal tokens are read-only and expire within hours.
+  (see [CLAUDE.md](CLAUDE.md)), and no token is ever committed. What bounds the
+  damage is the hours-long expiry, and that the token is only ever sent to the
+  one origin `WALDUR_API_URL` names — not that it is read-only, which it is
+  not: a portal token carries its holder's own scopes and roles.
 
 ### The number people misread
 
@@ -91,16 +96,22 @@ Four properties are what make that sound rather than merely convenient:
   inferred from that same tab. When the URL cannot be worked out, the extension
   shows its gate with the URL box blank rather than falling back to a built-in
   default — precisely so one deployment's credential can never be sent to
-  another.
+  another. That is enforced rather than arranged: every request checks the
+  origin it is about to be sent to, including the absolute URLs the portal
+  itself names in its `Link` headers, and a remembered token is stored with the
+  origin it was issued for and dropped rather than reused against a different
+  one.
 - **It is verified, not assumed.** `waldur/auth/token` is a HomePort internal,
   not a documented API, and a Waldur upgrade may rename it. So the token is put
   to `users/me/` before anything is built, and one the portal rejects demotes
   cleanly to the paste box with the reason on it.
-- **It is cheap to lose.** Read-only, about an hour of life, and a 401
-  mid-session is answered by re-reading the portal tab — whose front end has
-  been refreshing the token all along — and retrying once.
+- **It is cheap to lose.** About an hour of life, and a 401 mid-session is
+  answered by re-reading the portal tab — whose front end has been refreshing
+  the token all along — and retrying once. Not *harmless* to lose: it is your
+  own credential with your own roles on it, which is why the hour and the single
+  origin are the properties that matter.
 
-Worst case is therefore a read-only credential with an hour to live, held in
+Worst case is therefore your own credential with an hour to live, held in
 memory, sent to exactly one origin. [web/README.md](web/README.md) has the
 detail.
 
@@ -133,6 +144,7 @@ You need [pixi](https://pixi.sh). Nothing else — not even direnv.
 ```bash
 pixi install
 echo 'export WALDUR_API_TOKEN=<your token>' > .envrc.local   # gitignored
+chmod 600 .envrc.local                                       # see below
 pixi run waldur-tools whoami
 ```
 
@@ -140,6 +152,26 @@ The token comes from the portal, under your own account menu. `.envrc.local` is
 gitignored and never committed; `scripts/activate.sh` (committed, secret-free)
 sources it on every `pixi run` and `pixi shell`, along with sensible defaults
 for `WALDUR_API_URL` and `WALDUR_CACHE_DIR`.
+
+**The `chmod` matters on a shared machine.** The usual umask leaves a new file
+readable by every other account on the box, and this one holds the whole of
+your access to the portal. Nothing here can set it for you — the file is yours,
+written by hand, and quietly changing the mode of a file we did not create is
+not ours to do — so a command that finds it readable by others prints a warning
+and carries on. The same goes for `~/.config/waldur/token` and anything
+`WALDUR_TOKEN_FILE` points at.
+
+**What the tool writes, it locks itself.** Snapshots (directory `0700`, files
+`0600`), the SLURM job capture, exports from `-o`, and the generated
+`utilisation.html` are all owner-only — they carry an organisation's spend,
+project names and who ran what, and on a shared login node the default `0644`
+publishes that to everyone with an account. The three the caller names a path
+for are staged in a `0600` file beside the destination and moved into place, so
+they are never readable part-written and never inherit a permissive mode the
+path already had. Only the files, and only the cache directory the tool creates
+itself: a directory you named with `-o` is left exactly as you set it, since
+everything else already in it is somebody else's. On Windows `chmod` cannot
+express this and the calls are no-ops.
 
 Windows works the same way from the outside. `scripts/activate.bat` sets those
 defaults there, and since cmd.exe cannot source a shell file, the token is read
@@ -197,23 +229,39 @@ with `--desc`, `-o FILE.csv|.json|.parquet`, and `--all` on `allocations`,
 `membership`, `user-usage`, `monthly`, `monthly-totals`, `reconcile`,
 `storage` and `storage-monthly` to lift the scope filter described below.
 
-**Run `reconcile` before you quote anything from `monthly`, `monthly-totals` or
-`viz`.** It puts the node hours those three sum out of
-`openportal-allocation-user-usage` beside `incurred_costs` from `invoices` —
-the same node hours by a completely different route, since this deployment
-bills one credit per node hour — and prints one word per month:
+**The node hours in `monthly`, `monthly-totals` and `viz` come off the
+invoice.** This deployment bills one credit per node hour, and each invoice
+itemises its usage lines by project, so the ledger answers "how many node hours
+did this project run in this month?" directly. The reason to prefer it is not
+precision but permanence: **when a project's allocation is terminated the portal
+stops returning its usage rows entirely** — every month it ever ran, not just
+the months since — while the invoices it appeared on stand untouched. A total
+summed out of `openportal-allocation-user-usage` therefore shrinks every time a
+project finishes, and shrinks *retrospectively*, so last January's figure is
+smaller today than it was in January.
+
+The usage endpoint is still the only thing with a user axis, so `user-usage`,
+and the *active users* column everywhere else, still come from it — and are a
+**lower bound** in any month that had a project since terminated. Node hours in
+those months are complete; the head count is not.
+
+**Run `reconcile` before you quote anything.** It puts the two routes side by
+side and prints one word per month:
 
 ```
-month        node_hours   incurred_costs    difference   status
-2024-05       30,000.00        15,000.00     15,000.00   usage high
-2024-06       12,000.00        12,000.00          0.00   ok
+month        node_hours   incurred_costs    difference   missing   status
+2024-05       30,000.00        15,000.00     15,000.00      0.00   usage high
+2024-06       12,000.00        12,000.00          0.00      0.00   ok
+2024-07        8,000.00        10,000.00     -2,000.00  2,000.00   project ended
 ```
 
 (Illustrative — replace with your own snapshot's numbers.) `ok` means the two
-sides are within 1% of each other, and `usage high` / `usage low` mean the
-pull is the first thing to suspect — which is exactly the check that would
-have caught the paging bug described below, before an inflated headline
-could be read as a finding.
+sides are within 1% of each other. `usage high` / `usage low` mean the pull is
+the first thing to suspect — which is exactly the check that would have caught
+the paging bug described below, before an inflated headline could be read as a
+finding. `project ended` means the usage side is short by exactly what a
+terminated project was billed: nothing needs fixing and no reported figure is
+wrong, because the reported figures are the invoice's.
 
 The reports are thin: they select and rename columns from one or two endpoints
 and derive a handful of arithmetic ones. **[DEVELOPER.md](DEVELOPER.md) lists
@@ -483,15 +531,25 @@ Findings from working against a live deployment, which shaped the reports:
   past the true figure. It is fetched a month at a time instead, and both the
   pull and every read are checked for repeated rows. Details in
   [DEVELOPER.md](DEVELOPER.md#one-endpoint-cannot-be-paged-straight-through).
+- **Terminating a project erases its usage, retrospectively.** Once an
+  allocation is terminated, `openportal-allocation-user-usage` returns *no rows
+  at all* for that project code — not blanked rows, and not only the months
+  since it ended, but its whole history. Its invoices are untouched. This is
+  not something the reports can join their way around, and widening the scope to
+  include terminated `marketplace-resources` returns identical totals, because
+  there is nothing left on the other side to match. It is why the node-hour
+  figures are taken off the ledger; see the note above `reconcile`.
 - `invoices.incurred_costs` is **the same node hours by another route**. Every
   usage line on every invoice bills `1.0000000000` credits per hour, and
   `incurred_costs` equals those lines' quantities summed, to the last decimal
-  place, on every one of them. That is what `reconcile` cross-checks against —
-  and it is the only second opinion with a time axis, since the other pair that
-  agrees (`allocations.node_usage` and `current_month_spend`) covers only the
-  month in progress. Do not use `price` or `total` for this: they are net of
-  the credit lines that zero a grant-funded invoice out, so an invoice can
-  bill thousands of node hours and show a `total` near zero.
+  place, on every one of them. Each of those lines also carries a `project_uuid`
+  and a `project_name`, so the ledger splits by project as well as by month —
+  which is what makes it usable as the primary source and not only as a
+  cross-check. Do not use `price` or `total` for this: they are net of the
+  credit lines that zero a grant-funded invoice out, so an invoice can bill
+  thousands of node hours and show a `total` near zero. And beware the credit
+  line itself: its `billing_type` has been seen to read `usage`, so the usage
+  lines are picked out by `measured_unit == "hours"` and `unit_price == 1`.
 - Money and usage arrive as decimal *strings*, hence `frames.numeric`.
 - `slurm-*`, `events` and `keys` return empty; `support-issues` returns 424.
 - Unrecognised query parameters are silently ignored, so an unsupported filter

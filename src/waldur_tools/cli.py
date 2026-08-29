@@ -17,7 +17,7 @@ from . import slurm as slurm_module
 from . import viz as viz_report
 from .cache import DEFAULT_ENDPOINTS, Snapshot, SnapshotError, available, pull
 from .client import WaldurClient, WaldurError
-from .config import MissingTokenError, Settings
+from .config import PRIVATE_DIR, MissingTokenError, Settings, restrict, write_private
 from .reports import (
     DEFAULT_CUSTOMER,
     DEFAULT_SHARE,
@@ -92,12 +92,24 @@ def _size(value: object) -> str:
 
 
 def _write(frame: pl.DataFrame, output: Path) -> None:
-    if output.suffix == ".parquet":
-        frame.write_parquet(output)
-    elif output.suffix == ".json":
-        frame.write_json(output)
-    else:
-        frame.write_csv(output)
+    """Write a report where the reader asked for it, readable only by them.
+
+    Every report here carries the same figures the snapshot does -- spend,
+    project names, who ran what -- so an exported CSV is no less private than
+    the cache it came out of, and `-o` most often points somewhere shared.
+    """
+
+    def emit(path: Path) -> None:
+        # The format is `output`'s to decide -- `path` is a staging name and
+        # carries no extension worth reading.
+        if output.suffix == ".parquet":
+            frame.write_parquet(path)
+        elif output.suffix == ".json":
+            frame.write_json(path)
+        else:
+            frame.write_csv(path)
+
+    write_private(output, emit)
     console.print(f"[green]Wrote {frame.height} rows to {output}[/]")
 
 
@@ -206,7 +218,13 @@ def slurm_jobs(
     frame = slurm_module.capture(codes, start=since, cluster=cluster)
     target = output or (directory / slurm_module.JOBS_FILENAME)
     target.parent.mkdir(parents=True, exist_ok=True)
-    frame.write_parquet(target)
+    if output is None:
+        # Only the cache root, which is ours. A caller's `--output` can name any
+        # directory they like -- the one they are standing in, a group share --
+        # and taking that to 0700 would revoke everyone else's access to
+        # everything already in it, none of which this command wrote.
+        restrict(target.parent, PRIVATE_DIR)
+    write_private(target, frame.write_parquet)
 
     first, last = (
         frame.select(
@@ -324,7 +342,10 @@ def viz(
             source, nodes=nodes, share=share, customer=customer or None, jobs=frame
         )
 
-    output.write_text(page, encoding="utf-8")
+    # The finished report is the most concentrated thing this writes: every
+    # figure, every project name and every headline in one file, and it lands
+    # in the working directory by default.
+    write_private(output, lambda path: path.write_text(page, encoding="utf-8"))
     console.print(
         f"[green]Wrote {output}[/] ({len(page) / 1_048_576:.1f} MB) — open it in a browser"
     )

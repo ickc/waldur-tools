@@ -457,6 +457,21 @@ def _monthly_rows(
     which is as wide as these reports can honestly go: usage rows for other
     organisations do arrive, but their project codes resolve to no name, no
     customer and no node limit, so there is nothing to attribute them to.
+
+    **These rows are not a complete history, and cannot be made into one.**
+    When a project's allocation is terminated the portal stops returning its
+    usage rows -- every month of them, not just the months since. The rows are
+    gone from the endpoint, so no join here reaches them: widening the scope to
+    include terminated ``marketplace-resources`` returns exactly the same
+    totals, because there is nothing on the other side to match. Every
+    terminated project seen so far has had no usage rows anywhere in the table,
+    not merely none since it ended, while its invoices were untouched.
+
+    So this is the *per-user* series and nothing else. Anything that needs a
+    total takes it from :func:`invoiced_projects`, which is a decomposition of
+    the ledger and does not lose a project when the project ends. What is left
+    here that the invoice cannot give is the user axis -- who ran it -- and
+    that axis is short by exactly those projects. :func:`reconcile` names them.
     """
     if not scope:
         customer = None
@@ -466,6 +481,7 @@ def _monthly_rows(
             schema={
                 "month": pl.Date,
                 "project_code": pl.String,
+                "project_uuid": pl.String,
                 "project_name": pl.String,
                 "customer_name": pl.String,
                 "unix_username": pl.String,
@@ -473,7 +489,7 @@ def _monthly_rows(
             }
         )
 
-    projects = in_scope(source).drop("project_uuid")
+    projects = in_scope(source)
     if customer is not None:
         projects = projects.filter(pl.col("customer_name") == customer)
 
@@ -489,6 +505,7 @@ def _monthly_rows(
         .select(
             "month",
             "project_code",
+            "project_uuid",
             "project_name",
             "customer_name",
             "unix_username",
@@ -538,6 +555,70 @@ def _entitlement(nodes: int, share: float) -> pl.Expr:
     return nodes * share * 24 * days
 
 
+def _ledger_months(
+    billed: pl.DataFrame, header: pl.DataFrame, *, tolerance: float = RECONCILE_TOLERANCE
+) -> list[date]:
+    """The months whose ``node_hours`` may be read off the invoice.
+
+    An invoice existing is not enough. What the reports print is the *split* --
+    :func:`invoiced_projects`, the lines read one at a time -- and the lines can
+    go missing without the header moving: :func:`invoiced_projects` keeps only
+    what still looks like a usage line, and returns nothing at all for an
+    invoice whose ``items`` did not survive the pull. Trusting the header alone
+    would then read every project in that month as billed zero, label it
+    ``invoice``, and say nothing.
+
+    So a month is ledger-backed only where its lines sum to its own header,
+    within the allowance :func:`reconcile` uses -- the same condition, so a
+    month that falls back here is a month ``reconcile`` reports as
+    ``split incomplete`` rather than one that silently changed measurement.
+    """
+    if header.is_empty():
+        return []
+    lines = billed.group_by("month").agg(billed_node_hours=pl.col("node_hours").sum())
+    allowed = pl.max_horizontal(pl.lit(RECONCILE_FLOOR), tolerance * pl.col("incurred_costs").abs())
+    difference = pl.col("billed_node_hours").fill_null(0.0) - pl.col("incurred_costs")
+    return (
+        header.join(lines, on="month", how="left")
+        .filter(difference.abs() <= allowed)["month"]
+        .to_list()
+    )
+
+
+def _ledger_or_usage(
+    billed: pl.DataFrame,
+    used: pl.DataFrame,
+    invoiced_months: list[date],
+    *,
+    on: list[str],
+) -> pl.DataFrame:
+    """Join a ledger roll-up to a usage roll-up and pick which one ``node_hours`` is.
+
+    The rule is per month rather than per row. **In a month the portal has
+    invoiced, the invoice is the answer and a row missing from it is a zero**:
+    it billed nothing, which is a figure, not an absence. In a month it has not
+    invoiced yet -- or has invoiced something its own lines no longer add up to,
+    see :func:`_ledger_months` -- there is no ledger to read, so the usage
+    roll-up stands in, and ``node_hours_source`` says which of the two any given
+    row came from, because a reader comparing two months should know when they
+    are comparing two different measurements.
+
+    ``usage_node_hours`` is kept beside it either way. It is what
+    :func:`reconcile` checks the ledger against, and on a project the usage
+    endpoint has forgotten it is the visible sign that the two disagree.
+    """
+    frame = billed.join(used, on=on, how="full", coalesce=True)
+    invoiced_month = pl.col("month").is_in(invoiced_months)
+    return frame.with_columns(
+        node_hours=pl.when(invoiced_month)
+        .then(pl.col("node_hours").fill_null(0.0))
+        .otherwise(pl.col("usage_node_hours")),
+        node_hours_source=pl.when(invoiced_month)
+        .then(pl.lit("invoice"))
+        .otherwise(pl.lit("usage")),
+    )
+
+
 def monthly(
     source: Snapshot | WaldurClient,
     *,
@@ -548,15 +629,22 @@ def monthly(
 ) -> pl.DataFrame:
     """Node hours per project per calendar month, against our share of the machine.
 
-    ``openportal-allocation-user-usage`` is the only endpoint with a time axis:
-    one row per user, allocation and month, and its ``node_usage`` *is*
-    cumulative-safe to sum, unlike the identically named field on
-    ``openportal-allocations``. This groups those rows by project and month.
+    ``node_hours`` is the invoice's, from :func:`invoiced_projects`: the usage
+    lines of that month's invoice, already attributed to the project that ran
+    them. The user axis -- ``active_users`` -- is the only thing the invoice
+    cannot supply, and that comes from ``openportal-allocation-user-usage``.
 
-    Summing is only safe because the pull is. That endpoint cannot be paged end
-    to end -- it repeats rows across page boundaries -- so it is fetched a month
-    at a time and checked for repeated keys before any of this runs. See
-    :const:`waldur_tools.cache.BY_MONTH`.
+    **Why the ledger and not the usage endpoint.** The usage endpoint returns
+    nothing for a project whose allocation has been terminated: not the months
+    since it ended, the whole history. So a report summed out of it shrinks
+    every time a project finishes, and shrinks *retrospectively* -- last
+    January's figure is smaller today than it was in January. The invoice does
+    not move. Where the two can both answer they agree to a fraction of a
+    percent, which is what :func:`reconcile` is for.
+
+    ``active_users`` is therefore null, not zero, for a project the usage
+    endpoint no longer describes: nobody knows how many people ran it, and a
+    zero would say nobody did. ``node_hours`` for that project is still right.
 
     ``entitlement_node_hours`` is the whole organisation's monthly share --
     ``nodes * share * 24 * days_in_month``, so 384 nodes at 10% is roughly
@@ -567,23 +655,48 @@ def monthly(
 
     ``customer`` restricts to one organisation's projects (ours by default);
     ``scope=False``, or ``customer=None``, widens it to every project the token
-    administers -- which adds the separately funded UKRI and other, separately funded
-    projects, and so overstates our own share.
+    administers -- which adds the separately funded UKRI and other, separately
+    funded projects, and so overstates our own share.
     """
+    scoped = None if not scope else customer
     rows = _monthly_rows(source, customer=customer, scope=scope)
-    if rows.is_empty():
+    billed = invoiced_projects(source, customer=scoped)
+    if rows.is_empty() and billed.is_empty():
         return rows
 
+    months = _ledger_months(billed, invoiced(source, customer=scoped))
+
+    used = rows.group_by("month", "project_uuid").agg(
+        usage_node_hours=pl.col("node_usage").sum(),
+        active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),
+        usage_project_code=pl.col("project_code").first(),
+        usage_project_name=pl.col("project_name").first(),
+        usage_customer_name=pl.col("customer_name").first(),
+    )
     return (
-        rows.group_by("month", "project_code", "project_name", "customer_name")
-        .agg(
-            node_hours=pl.col("node_usage").sum(),
-            active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),
+        _ledger_or_usage(billed, used, months, on=["month", "project_uuid"])
+        .with_columns(
+            project_code=pl.coalesce("project_code", "usage_project_code"),
+            project_name=pl.coalesce("project_name", "usage_project_name"),
+            customer_name=pl.coalesce("customer_name", "usage_customer_name"),
         )
         .with_columns(entitlement_node_hours=_entitlement(nodes, share))
         .with_columns(
             pct_of_entitlement=100 * pl.col("node_hours") / pl.col("entitlement_node_hours"),
             mean_nodes=pl.col("node_hours") / (pl.col("entitlement_node_hours") / (nodes * share)),
+        )
+        .select(
+            "month",
+            "project_code",
+            "project_name",
+            "customer_name",
+            "node_hours",
+            "usage_node_hours",
+            "node_hours_source",
+            "active_users",
+            "entitlement_node_hours",
+            "pct_of_entitlement",
+            "mean_nodes",
         )
         .sort("month", "node_hours", descending=[False, True])
     )
@@ -603,34 +716,238 @@ def monthly_totals(
     the number the report is built around -- 100% means we ran, on average
     across the month, exactly the ``nodes * share`` nodes our share is worth.
 
-    ``active_projects`` and ``active_users`` count only those with non-zero
-    usage, so they read as "who actually ran something", not "who could have".
+    ``node_hours`` is the month's invoice -- see :func:`monthly` for why the
+    ledger rather than the usage endpoint, and :func:`_ledger_or_usage` for
+    what happens in a month not yet invoiced. ``usage_node_hours`` is the same
+    month summed out of ``openportal-allocation-user-usage``, kept beside it as
+    the cross-check :func:`reconcile` formalises.
+
+    **Only ``active_projects`` counts what the ledger knows.** A project billed
+    for node hours ran them, whether or not its usage rows still exist, so that
+    count is taken from the invoice -- and, in a month with no invoice to read,
+    from the same usage rows ``node_hours`` falls back to, so that the two
+    always describe the same measurement. ``active_users`` cannot be: the
+    invoice has no user axis at all. It is therefore a **lower bound** wherever
+    ``projects_without_usage`` is above zero -- those projects contributed
+    people that nothing left in the API can count. Both still count only
+    non-zero usage, so they read as "who actually ran something" rather than
+    "who could have".
 
     ``is_partial`` marks the month the snapshot was taken in, which is
     incomplete by construction and must be kept out of any average.
     """
+    scoped = None if not scope else customer
     rows = _monthly_rows(source, customer=customer, scope=scope)
-    if rows.is_empty():
+    billed = invoiced_projects(source, customer=scoped)
+    if rows.is_empty() and billed.is_empty():
         return rows
+
+    months = _ledger_months(billed, invoiced(source, customer=scoped))
+    used = rows.group_by("month").agg(
+        usage_node_hours=pl.col("node_usage").sum(),
+        active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),
+        projects_with_usage_rows=pl.col("project_code").n_unique(),
+        usage_active_projects=pl.col("project_code").filter(pl.col("node_usage") > 0).n_unique(),
+    )
+    ledger = billed.group_by("month").agg(
+        node_hours=pl.col("node_hours").sum(),
+        active_projects=pl.col("project_uuid").filter(pl.col("node_hours") > 0).n_unique(),
+        projects_without_usage=pl.col("project_code").is_null().sum(),
+    )
 
     today = as_of(source)
     return (
-        rows.group_by("month")
-        .agg(
-            node_hours=pl.col("node_usage").sum(),
-            active_projects=pl.col("project_code").filter(pl.col("node_usage") > 0).n_unique(),
-            active_users=pl.col("unix_username").filter(pl.col("node_usage") > 0).n_unique(),
-            projects_with_usage_rows=pl.col("project_code").n_unique(),
+        _ledger_or_usage(ledger, used, months, on=["month"])
+        .with_columns(
+            # `active_projects` follows `node_hours`: counting the ledger's
+            # projects beside a usage-sourced total would report no projects at
+            # all for a month that plainly ran something.
+            active_projects=pl.when(pl.col("node_hours_source") == "invoice")
+            .then(pl.col("active_projects").fill_null(0))
+            .otherwise(pl.col("usage_active_projects").fill_null(0)),
+            projects_without_usage=pl.col("projects_without_usage").fill_null(0),
+            projects_with_usage_rows=pl.col("projects_with_usage_rows").fill_null(0),
+            entitlement_node_hours=_entitlement(nodes, share),
         )
-        .with_columns(entitlement_node_hours=_entitlement(nodes, share))
         .with_columns(
             pct_of_entitlement=100 * pl.col("node_hours") / pl.col("entitlement_node_hours"),
             mean_nodes=pl.col("node_hours") / (pl.col("entitlement_node_hours") / (nodes * share)),
             unused_node_hours=pl.col("entitlement_node_hours") - pl.col("node_hours"),
             is_partial=pl.col("month") == date(today.year, today.month, 1),
         )
+        .select(
+            "month",
+            "node_hours",
+            "usage_node_hours",
+            "node_hours_source",
+            "active_projects",
+            "active_users",
+            "projects_with_usage_rows",
+            "projects_without_usage",
+            "entitlement_node_hours",
+            "pct_of_entitlement",
+            "mean_nodes",
+            "unused_node_hours",
+            "is_partial",
+        )
         .sort("month")
     )
+
+
+def _invoices(source: Snapshot | WaldurClient, *, customer: str | None) -> pl.DataFrame:
+    """The ``invoices`` rows for one organisation, with ``year``/``month`` numeric.
+
+    Shared by :func:`invoiced` and :func:`invoiced_projects` so that the header
+    total and the per-project lines are always read off the same set of
+    invoices. ``customer`` filters on the name inside ``customer_details``;
+    ``None`` keeps every invoice the token can see.
+
+    **A snapshot taken without the ``invoices`` endpoint is not an error here.**
+    ``waldur-tools snapshot`` pulls it by default, but a snapshot naming its own
+    endpoints need not, and the reports built on this degrade to the usage
+    endpoint rather than refusing to run -- with ``node_hours_source`` saying
+    which of the two every month came from. Losing the whole report over a
+    missing cross-check would be the worse trade; losing it silently would be
+    worse still, which is what that column is for.
+    """
+    try:
+        frame = load(source, ["invoices"])["invoices"]
+    except SnapshotError:
+        return pl.DataFrame()
+    if frame.is_empty():
+        return frame
+    frame = integral(frame, "year", "month")
+    if customer is not None and "customer_details" in frame.columns:
+        frame = frame.filter(pl.col("customer_details").str.json_path_match("$.name") == customer)
+    return frame
+
+
+def invoiced_projects(
+    source: Snapshot | WaldurClient, *, customer: str | None = DEFAULT_CUSTOMER
+) -> pl.DataFrame:
+    """The node hours the portal billed, one row per project per calendar month.
+
+    :func:`invoiced` reads the invoice header; this reads the lines underneath
+    it. Each ``invoices.items[]`` entry carries a ``project_uuid``, a
+    ``project_name`` and a ``quantity``, so the same node hours the header
+    states as one number arrive here already attributed to the project that ran
+    them.
+
+    **Only the usage lines are kept**: ``measured_unit == "hours"`` and
+    ``unit_price == 1``. An invoice also carries the credit line the portal
+    writes to zero a grant-funded month out, which is a single ``fixed`` entry
+    with a large negative ``unit_price`` and a ``quantity`` of one -- summing
+    that in would subtract a number of node hours that were never node hours.
+    Filtering on the two fields together rather than on ``billing_type`` alone
+    is deliberate: the credit line's ``billing_type`` has been seen to read
+    ``usage`` as readily as ``fixed``, where the unit and the unit price have
+    never been anything but what a node hour costs.
+
+    The kept lines sum, per month, to that month's ``incurred_costs`` exactly --
+    checked against every invoice in every snapshot to date, to the last decimal
+    place. So this is a decomposition of the ledger rather than a second
+    estimate of it, and :func:`reconcile` reports the two side by side so a
+    month where that stops being true says so.
+
+    **This is the only per-project series that survives a project ending.**
+    ``openportal-allocation-user-usage`` returns nothing at all for a project
+    whose allocation has been terminated -- not blanked rows, no rows -- while
+    the invoices that project appeared on stay exactly as they were. See
+    :func:`_monthly_rows`.
+
+    ``project_code`` is filled in from :func:`in_scope` where the project still
+    has an allocation, and is null where it does not; ``project_name`` is the
+    invoice's own and is always present.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "month": pl.Date,
+            "project_uuid": pl.String,
+            "project_name": pl.String,
+            "project_code": pl.String,
+            "customer_name": pl.String,
+            "node_hours": pl.Float64,
+        }
+    )
+    frame = _invoices(source, customer=customer)
+    if frame.is_empty() or "items" not in frame.columns:
+        return empty
+
+    columns = ["year", "month", "items"]
+    if "customer_details" in frame.columns:
+        columns.append("customer_details")
+    rows: list[dict[str, object]] = []
+    for record in frame.select(columns).iter_rows(named=True):
+        owner = _customer_name(record.get("customer_details"))
+        for item in _items(record["items"]):
+            if item.get("measured_unit") != "hours":
+                continue
+            if _number(item.get("unit_price")) != 1.0:
+                continue
+            rows.append(
+                {
+                    "year": record["year"],
+                    "month": record["month"],
+                    "project_uuid": item.get("project_uuid"),
+                    "project_name": item.get("project_name"),
+                    "customer_name": owner,
+                    "node_hours": _number(item.get("quantity")) or 0.0,
+                }
+            )
+    if not rows:
+        return empty
+
+    codes = in_scope(source).select("project_uuid", "project_code").drop_nulls("project_uuid")
+    return (
+        pl.DataFrame(
+            rows,
+            schema_overrides={
+                "project_uuid": pl.String,
+                "project_name": pl.String,
+                "customer_name": pl.String,
+            },
+        )
+        .with_columns(month=pl.date(pl.col("year"), pl.col("month"), 1))
+        .drop_nulls("month")
+        .group_by("month", "project_uuid", "project_name", "customer_name")
+        .agg(node_hours=pl.col("node_hours").sum())
+        .join(codes.unique(subset=["project_uuid"], keep="first"), on="project_uuid", how="left")
+        .select(
+            "month", "project_uuid", "project_name", "project_code", "customer_name", "node_hours"
+        )
+        .sort("month", "node_hours", descending=[False, True])
+    )
+
+
+def _customer_name(payload: object) -> str | None:
+    """The organisation's name out of an invoice's ``customer_details`` blob."""
+    if not isinstance(payload, str) or not payload:
+        return None
+    try:
+        decoded = json.loads(payload)
+    except ValueError:
+        return None
+    name = decoded.get("name") if isinstance(decoded, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def _items(payload: object) -> list[dict[str, object]]:
+    """An invoice's ``items`` back out of the JSON text :func:`to_frame` left it as."""
+    if not isinstance(payload, str) or not payload:
+        return []
+    try:
+        decoded = json.loads(payload)
+    except ValueError:
+        return []
+    return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
+
+
+def _number(value: object) -> float | None:
+    """A decimal string (or number) as a float, or ``None`` if it is neither."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def invoiced(
@@ -656,19 +973,14 @@ def invoiced(
     side and the invoice side are asked about the same organisation. ``None``
     keeps every invoice the token can see.
     """
-    frame = load(source, ["invoices"])["invoices"]
+    frame = _invoices(source, customer=customer)
     empty = pl.DataFrame(
         schema={"month": pl.Date, "incurred_costs": pl.Float64, "invoice_state": pl.String}
     )
     if frame.is_empty():
         return empty
 
-    frame = integral(numeric(frame, "incurred_costs"), "year", "month")
-    if customer is not None and "customer_details" in frame.columns:
-        frame = frame.filter(pl.col("customer_details").str.json_path_match("$.name") == customer)
-    if frame.is_empty():
-        return empty
-
+    frame = numeric(frame, "incurred_costs")
     return (
         frame.with_columns(month=pl.date(pl.col("year"), pl.col("month"), 1))
         .drop_nulls("month")
@@ -692,11 +1004,10 @@ def reconcile(
 
     Two routes to one number. ``node_hours`` is
     ``openportal-allocation-user-usage`` summed over a user, an allocation and a
-    month, exactly as :func:`monthly_totals` does it; ``incurred_costs`` is what
+    month -- the route the reports no longer take; ``incurred_costs`` is what
     the portal billed the organisation for that month, and equals node hours on
     this deployment (see :func:`invoiced`). They come from different endpoints,
-    aggregated by different sides of the portal, so agreement is evidence and
-    disagreement is a defect -- in the pull, in the scope, or in the billing.
+    aggregated by different sides of the portal, so agreement is evidence.
 
     **This is the check that would have caught the paging bug**, before an
     inflated headline could be read as a finding. Run against a
@@ -708,7 +1019,7 @@ def reconcile(
     the signature of unstable ``LIMIT``/``OFFSET`` paging: rows repeat and
     vanish across page boundaries everywhere except at the tail. A correctly
     pulled snapshot instead agrees with the invoice to a small fraction of a
-    percent in every month.
+    percent in every month -- **except where a project has ended.**
 
     ``difference`` is ``node_hours - incurred_costs``, so it is **positive when
     we counted usage nobody billed** -- the shape a duplicated pull takes -- and
@@ -719,13 +1030,38 @@ def reconcile(
         Within ``tolerance`` of the invoice, or within :data:`RECONCILE_FLOOR`
         node hours of it, whichever is the larger allowance. A month with no
         usage and a zero invoice is ``ok`` rather than empty.
+    ``project ended``
+        The usage side is low, and ``missing_node_hours`` -- the node hours
+        billed that month to projects the usage endpoint no longer describes at
+        all -- covers the gap. Not a defect in anything: the portal drops a
+        terminated project's usage rows retrospectively while its invoices
+        stand. Nothing needs fixing and no reported figure is wrong, because
+        every reported figure comes from the ledger.
     ``usage high`` / ``usage low``
-        Outside it, in the direction named. Suspect the pull first.
+        Outside the allowance and *not* explained that way. Suspect the pull
+        first.
     ``no invoice``
         Usage in a month the portal has not invoiced. Nothing to check against;
         not a finding on its own.
     ``no usage``
         An invoice with no usage rows behind it at all.
+    ``split incomplete``
+        The invoice's own lines no longer sum to its header, so the per-project
+        split :func:`monthly_totals` reports is short of what the portal
+        charged. Checked first, and reported ahead of anything the usage side
+        says, because a ledger that does not add up is not a thing to measure
+        usage against.
+
+    ``billed_node_hours`` is the same invoices read line by line rather than off
+    their headers -- :func:`invoiced_projects` summed per month. It is what
+    :func:`monthly_totals` reports, and it should equal ``incurred_costs``
+    exactly; ``items_difference`` says so, and anything but a zero there means
+    a usage line has stopped looking like a usage line and the per-project
+    split has quietly lost some. That is what ``split incomplete`` reports.
+
+    ``missing_projects`` counts the projects billed in that month with no usage
+    rows behind them, and ``missing_node_hours`` is what they were billed. Those
+    two are the whole of the discrepancy this report used to blame on the pull.
 
     ``is_partial`` marks the month the snapshot was taken in. It reconciles like
     any other -- both sides stop at the same instant -- but neither figure is
@@ -745,14 +1081,30 @@ def reconcile(
         .agg(node_hours=pl.col("node_usage").sum())
     )
     billed = invoiced(source, customer=customer)
+    lines = (
+        invoiced_projects(source, customer=customer)
+        .group_by("month")
+        .agg(
+            billed_node_hours=pl.col("node_hours").sum(),
+            # A billed project with no `project_code` is one `in_scope` cannot name,
+            # which on this deployment means its allocation is gone -- and with it
+            # every usage row it ever had. That is the whole of the gap below.
+            missing_projects=pl.col("project_code").is_null().sum(),
+            missing_node_hours=pl.col("node_hours").filter(pl.col("project_code").is_null()).sum(),
+        )
+    )
     if usage.is_empty() and billed.is_empty():
         return pl.DataFrame(
             schema={
                 "month": pl.Date,
                 "node_hours": pl.Float64,
                 "incurred_costs": pl.Float64,
+                "billed_node_hours": pl.Float64,
+                "items_difference": pl.Float64,
                 "difference": pl.Float64,
                 "pct_difference": pl.Float64,
+                "missing_projects": pl.UInt32,
+                "missing_node_hours": pl.Float64,
                 "status": pl.String,
                 "invoice_state": pl.String,
                 "is_partial": pl.Boolean,
@@ -768,9 +1120,22 @@ def reconcile(
     allowed = pl.max_horizontal(
         pl.lit(RECONCILE_FLOOR), tolerance * pl.col("incurred_costs").fill_null(0.0).abs()
     )
+    # The gap a terminated project leaves is exactly what that project was
+    # billed, so the residual after adding it back is what the allowance judges.
+    explained = (gap + pl.col("missing_node_hours").fill_null(0.0)).abs() <= allowed
+    # The lines are what `monthly_totals` reports, so a split that no longer sums
+    # to its own header is checked before the usage side is checked against it:
+    # the ledger has to be sound before it is any use as the thing to compare to.
+    split_lost = pl.col("incurred_costs").is_not_null() & (
+        (pl.col("billed_node_hours").fill_null(0.0) - pl.col("incurred_costs")).abs() > allowed
+    )
     return (
         usage.join(billed, on="month", how="full", coalesce=True)
+        .join(lines, on="month", how="left")
         .with_columns(
+            items_difference=(
+                pl.col("billed_node_hours").fill_null(0.0) - pl.col("incurred_costs").fill_null(0.0)
+            ),
             difference=pl.col("node_hours") - pl.col("incurred_costs"),
             pct_difference=(
                 100
@@ -778,24 +1143,36 @@ def reconcile(
                 / pl.col("incurred_costs").replace(0.0, None)
             ),
             status=(
-                pl.when(gap.abs() <= allowed)
+                pl.when(split_lost)
+                .then(pl.lit("split incomplete"))
+                .when(gap.abs() <= allowed)
                 .then(pl.lit("ok"))
                 .when(pl.col("incurred_costs").is_null())
                 .then(pl.lit("no invoice"))
                 .when(pl.col("node_hours").is_null())
                 .then(pl.lit("no usage"))
+                .when((gap < 0) & explained)
+                .then(pl.lit("project ended"))
                 .when(gap > 0)
                 .then(pl.lit("usage high"))
                 .otherwise(pl.lit("usage low"))
             ),
             is_partial=pl.col("month") == date(today.year, today.month, 1),
         )
+        .with_columns(
+            missing_projects=pl.col("missing_projects").fill_null(0),
+            missing_node_hours=pl.col("missing_node_hours").fill_null(0.0),
+        )
         .select(
             "month",
             "node_hours",
             "incurred_costs",
+            "billed_node_hours",
+            "items_difference",
             "difference",
             "pct_difference",
+            "missing_projects",
+            "missing_node_hours",
             "status",
             "invoice_state",
             "is_partial",

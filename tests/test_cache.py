@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import stat
+import sys
+
 import httpx
 import pytest
 import respx
@@ -10,6 +13,7 @@ from conftest import API_URL
 from waldur_tools import client as client_module
 from waldur_tools.cache import BY_MONTH, SnapshotError, check, fetch, pull
 from waldur_tools.client import WaldurClient, WaldurError
+from waldur_tools.config import PRIVATE_DIR, PRIVATE_FILE
 from waldur_tools.frames import to_frame
 
 USAGE = "openportal-allocation-user-usage"
@@ -148,3 +152,24 @@ def test_pull_writes_a_snapshot_and_its_counts(settings, tmp_path):
         snapshot, counts = pull(client, ["users"], root=tmp_path, name="one")
     assert counts == {"users": 1}
     assert snapshot.read("users").height == 1
+
+
+@respx.mock
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod is a no-op on Windows")
+def test_a_snapshot_is_readable_only_by_the_person_who_pulled_it(settings, tmp_path):
+    """It holds an organisation's spend, project names and people.
+
+    The cache root defaults under the user's home, which on a shared HPC login
+    node is a directory every other account can walk into. The default umask
+    would leave every parquet file in it world-readable.
+    """
+    respx.get(f"{API_URL}/api/users/").mock(
+        return_value=httpx.Response(200, json=[{"unix_username": "alice"}])
+    )
+    with WaldurClient(settings) as client:
+        snapshot, _counts = pull(client, ["users"], root=tmp_path, name="private")
+
+    assert stat.S_IMODE(snapshot.path.stat().st_mode) == PRIVATE_DIR
+    for name in ("users.parquet", "meta.json"):
+        mode = stat.S_IMODE((snapshot.path / name).stat().st_mode)
+        assert mode == PRIVATE_FILE, f"{name} is {stat.filemode(mode)}"
